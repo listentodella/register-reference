@@ -273,5 +273,17 @@ pages:
 
   console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, register notes, and chip attachments`);
 } finally {
-  await browser.close();
+  let closeTimer;
+  const closeTimedOut = await Promise.race([
+    browser.close().then(() => false),
+    new Promise((resolveTimeout) => {
+      closeTimer = setTimeout(() => resolveTimeout(true), 10_000);
+    }),
+  ]);
+  clearTimeout(closeTimer);
+  if (closeTimedOut) console.warn(`${browserEngine} browser cleanup timed out; forcing test process exit`);
 }
+
+// Some WebKit runner processes stay alive after all assertions and browser.close().
+// Reaching this line means the complete suite passed and cleanup had its chance.
+process.exit(0);
