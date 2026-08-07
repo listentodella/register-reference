@@ -10,7 +10,14 @@ const browserEngine = process.env.BROWSER_ENGINE || "chromium";
 const browserType = { chromium, webkit }[browserEngine];
 if (!browserType) throw new Error(`unsupported BROWSER_ENGINE: ${browserEngine}`);
 const launchOptions = browserEngine === "chromium" && existsSync(chromePath) ? { executablePath: chromePath } : {};
+const suiteWatchdog = setTimeout(() => {
+  console.error(`${browserEngine} viewer tests exceeded the 120 second suite timeout`);
+  process.exit(1);
+}, 120_000);
+
+console.log(`[${browserEngine}] launching browser`);
 const browser = await browserType.launch(launchOptions);
+console.log(`[${browserEngine}] browser launched`);
 
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -107,6 +114,7 @@ pages:
   assert.equal(await page.locator("#chipSelect option", { hasText: "INVALID64" }).count(), 0);
   await page.locator("#importResultConfirmButton").click();
   assert.deepEqual(errors, []);
+  console.log(`[${browserEngine}] main viewer checks passed`);
 
   const notesPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const noteErrors = [];
@@ -196,6 +204,7 @@ pages:
   assert.equal(await notesPage.locator("#matrixGrid .cell-note-indicator").count(), 0);
   assert.deepEqual(noteErrors, []);
   await notesPage.close();
+  console.log(`[${browserEngine}] register note checks passed`);
 
   const attachmentsPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const attachmentErrors = [];
@@ -270,6 +279,7 @@ pages:
   assert.match(await attachmentsPage.locator("#attachmentsStatus").innerText(), /原文件未删除/);
   assert.deepEqual(attachmentErrors, []);
   await attachmentsPage.close();
+  console.log(`[${browserEngine}] attachment checks passed`);
 
   console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, register notes, and chip attachments`);
 } finally {
@@ -281,6 +291,7 @@ pages:
     }),
   ]);
   clearTimeout(closeTimer);
+  clearTimeout(suiteWatchdog);
   if (closeTimedOut) console.warn(`${browserEngine} browser cleanup timed out; forcing test process exit`);
 }
 
