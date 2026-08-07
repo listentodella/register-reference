@@ -18,7 +18,7 @@ jobs:
         include:
           - name: macOS
             id: macos
-            os: macos-14
+            os: macos-15
             build_args: --bundles app
           - name: Windows
             id: windows
@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -50,7 +50,7 @@ jobs:
             wget
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
