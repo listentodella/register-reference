@@ -1,0 +1,4 @@
+interface:
+  display_name: "寄存器 YAML 生成器"
+  short_description: "从芯片数据手册生成并校验寄存器速查工具兼容的 YAML 描述文件"
+  default_prompt: "使用 $register-yaml-generator 根据芯片数据手册生成并校验寄存器 YAML。"

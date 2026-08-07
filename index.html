@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>寄存器速查工具</title>
+    <link rel="icon" href="favicon.png" type="image/png">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">REG</div>
+          <div>
+            <h1>寄存器速查工具</h1>
+            <p id="chipMeta">加载中</p>
+          </div>
+        </div>
+
+        <div class="toolbar" aria-label="寄存器筛选">
+          <label class="control">
+            <span>芯片</span>
+            <select id="chipSelect"></select>
+          </label>
+          <label class="control">
+            <span>页面</span>
+            <select id="pageSelect"></select>
+          </label>
+          <label class="control search-control">
+            <span>搜索</span>
+            <input id="searchInput" type="search" spellcheck="false" placeholder="地址 / 名称 / 字段">
+          </label>
+          <button id="loadYamlButton" class="tool-button" type="button" title="导入 YAML">
+            <i data-lucide="file-plus-2"></i><span>导入 YAML</span>
+          </button>
+          <button id="loadFolderButton" class="tool-button" type="button" title="关联 YAML 目录">
+            <i data-lucide="folder-plus"></i><span>关联目录</span>
+          </button>
+          <button id="libraryButton" class="tool-button library-button" type="button">
+            <i data-lucide="library-big"></i><span>芯片库</span>
+          </button>
+          <button id="attachmentsButton" class="tool-button attachments-button" type="button" title="当前芯片附件" hidden>
+            <i data-lucide="paperclip"></i><span>附件</span><span id="attachmentsButtonCount" class="action-count" hidden></span>
+          </button>
+          <div id="themePicker" class="theme-picker">
+            <button id="themeButton" class="icon-button theme-button" type="button" title="切换主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false">
+              <i data-lucide="palette"></i>
+            </button>
+            <div id="themeMenu" class="theme-menu" role="menu" aria-label="界面主题" hidden>
+              <button type="button" role="menuitemradio" data-theme-option="system" aria-checked="false">
+                <span class="theme-preview system" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>跟随系统</span>
+                <i class="theme-check" data-lucide="check"></i>
+              </button>
+              <button type="button" role="menuitemradio" data-theme-option="light" aria-checked="true">
+                <span class="theme-preview light" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>清晰亮色</span>
+                <i class="theme-check" data-lucide="check"></i>
+              </button>
+              <button type="button" role="menuitemradio" data-theme-option="dark" aria-checked="false">
+                <span class="theme-preview dark" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>石墨深色</span>
+                <i class="theme-check" data-lucide="check"></i>
+              </button>
+              <button type="button" role="menuitemradio" data-theme-option="contrast" aria-checked="false">
+                <span class="theme-preview contrast" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>高对比</span>
+                <i class="theme-check" data-lucide="check"></i>
+              </button>
+            </div>
+          </div>
+          <input id="yamlFileInput" type="file" accept=".yaml,.yml" multiple hidden>
+          <input id="yamlFolderInput" type="file" accept=".yaml,.yml" multiple webkitdirectory hidden>
+          <div class="segmented" role="tablist" aria-label="视图">
+            <button id="matrixViewButton" class="active" type="button" data-view="matrix">矩阵</button>
+            <button id="tableViewButton" type="button" data-view="table">传统</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="status-band" id="statusBand"></section>
+
+      <main>
+        <section id="matrixView" class="view-section">
+          <div class="section-head">
+            <div>
+              <h2>地址矩阵</h2>
+              <p id="matrixSummary"></p>
+            </div>
+            <div class="legend">
+              <span><i class="legend-chip rw"></i>RW</span>
+              <span><i class="legend-chip ro"></i>RO</span>
+              <span><i class="legend-chip wo"></i>WO</span>
+              <span><i class="legend-chip special"></i>特殊</span>
+            </div>
+          </div>
+          <div id="matrixGrid" class="address-grid" aria-label="寄存器地址矩阵"></div>
+        </section>
+
+        <section id="tableView" class="view-section hidden">
+          <div class="section-head">
+            <div>
+              <h2>传统视图</h2>
+              <p id="tableSummary"></p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="register-table">
+              <thead>
+                <tr>
+                  <th>地址</th>
+                  <th>寄存器</th>
+                  <th>属性</th>
+                  <th>寄存器值</th>
+                  <th>描述</th>
+                  <th>位域与解码</th>
+                </tr>
+              </thead>
+              <tbody id="registerTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <div id="hoverPanel" class="hover-panel" hidden></div>
+
+      <div id="libraryBackdrop" class="library-backdrop" hidden>
+        <aside id="libraryPanel" class="library-panel" role="dialog" aria-modal="true" aria-labelledby="libraryTitle">
+          <header class="library-head">
+            <div>
+              <h2 id="libraryTitle">芯片库</h2>
+              <p id="librarySummary"></p>
+            </div>
+            <button id="libraryCloseButton" class="icon-button" type="button" title="关闭芯片库" aria-label="关闭芯片库">
+              <i data-lucide="x"></i>
+            </button>
+          </header>
+
+          <div class="library-toolbar">
+            <label class="library-search">
+              <i data-lucide="search"></i>
+              <input id="librarySearchInput" type="search" spellcheck="false" placeholder="搜索芯片、厂商或分类">
+            </label>
+            <button id="libraryImportButton" class="tool-button" type="button">
+              <i data-lucide="file-plus-2"></i><span>导入</span>
+            </button>
+            <button id="libraryFolderButton" class="tool-button" type="button">
+              <i data-lucide="folder-sync"></i><span>目录</span>
+            </button>
+          </div>
+
+          <div class="library-list-head" aria-hidden="true">
+            <span>导出</span><span>芯片</span><span>分类</span><span>显示</span><span>来源</span><span></span>
+          </div>
+          <div id="libraryList" class="library-list"></div>
+
+          <footer class="library-footer">
+            <div id="libraryStatus" class="library-status" aria-live="polite"></div>
+            <div class="library-export-actions">
+              <label class="export-notes-control">
+                <input id="includeNotesExport" type="checkbox" checked>
+                <span>包含备注</span>
+              </label>
+              <button id="exportSelectedButton" class="primary-button" type="button">
+                <i data-lucide="file-down"></i><span>导出所选芯片</span>
+              </button>
+            </div>
+          </footer>
+          <datalist id="categoryOptions"></datalist>
+        </aside>
+      </div>
+
+      <dialog id="attachmentsDialog" class="attachments-dialog" aria-labelledby="attachmentsDialogTitle">
+        <header class="attachments-dialog-head">
+          <div>
+            <h2 id="attachmentsDialogTitle">芯片附件</h2>
+            <p id="attachmentsDialogChip"></p>
+          </div>
+          <button id="attachmentsDialogCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="attachments-toolbar">
+          <span id="attachmentsSummary"></span>
+          <button id="addAttachmentsButton" class="primary-button" type="button">
+            <i data-lucide="paperclip"></i><span>添加附件</span>
+          </button>
+        </div>
+        <div id="attachmentsList" class="attachments-list"></div>
+        <footer class="attachments-footer">
+          <div id="attachmentsStatus" class="attachments-status" aria-live="polite"></div>
+        </footer>
+      </dialog>
+
+      <dialog id="noteDialog" class="note-dialog" aria-labelledby="noteDialogTitle">
+        <header class="note-dialog-head">
+          <div>
+            <h2 id="noteDialogTitle">寄存器备注</h2>
+            <p id="noteDialogRegister"></p>
+          </div>
+          <button id="noteDialogCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="note-dialog-body">
+          <div id="noteList" class="note-list"></div>
+          <form id="noteForm" class="note-form">
+            <div class="note-form-head">
+              <strong id="noteFormTitle">添加备注</strong>
+              <span id="noteCharacterCount">0/4000</span>
+            </div>
+            <div id="noteKindControl" class="note-kind-control" role="radiogroup" aria-label="备注类型">
+              <button class="active" type="button" data-note-kind="note" aria-pressed="true">
+                <i data-lucide="sticky-note"></i><span>备注</span>
+              </button>
+              <button type="button" data-note-kind="warning" aria-pressed="false">
+                <i data-lucide="triangle-alert"></i><span>注意</span>
+              </button>
+              <button type="button" data-note-kind="todo" aria-pressed="false">
+                <i data-lucide="circle-help"></i><span>待确认</span>
+              </button>
+            </div>
+            <textarea id="noteContentInput" maxlength="4000" rows="5" placeholder="输入需要保留的经验、限制或待确认事项"></textarea>
+            <div id="noteFormStatus" class="note-form-status" aria-live="polite"></div>
+            <footer>
+              <button id="noteCancelEditButton" class="secondary-button" type="button" hidden>取消编辑</button>
+              <button id="noteSaveButton" class="primary-button" type="submit" disabled>
+                <i data-lucide="save"></i><span>保存备注</span>
+              </button>
+            </footer>
+          </form>
+        </div>
+      </dialog>
+
+      <dialog id="importResultDialog" class="import-result-dialog" aria-labelledby="importResultTitle">
+        <header>
+          <div>
+            <h2 id="importResultTitle">YAML 未导入</h2>
+            <p id="importResultSummary"></p>
+          </div>
+          <button id="importResultCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <pre id="importResultDetails" tabindex="0"></pre>
+        <footer>
+          <button id="importResultConfirmButton" class="primary-button" type="button">知道了</button>
+        </footer>
+      </dialog>
+    </div>
+
+    <script src="data/chips.data.js"></script>
+    <script src="yaml-lite.js"></script>
+    <script src="yaml-validator.js"></script>
+    <script src="vendor/lucide.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

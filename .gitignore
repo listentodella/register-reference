@@ -1,0 +1,15 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Imported chip libraries are local user data. Public samples must be
+# explicitly allowlisted so generated or licensed register data is not
+# committed by accident.
+/*.yaml
+!/dwc3_rk3588.yaml
+/data/chips.data.js
+/register-reference.html

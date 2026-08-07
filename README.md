@@ -1,0 +1,104 @@
+# 寄存器速查工具
+
+这是一个 Tauri v2 + vanilla HTML/CSS/JavaScript 的本地寄存器资料库。芯片定义仍使用可移植的 YAML；SQLite 只保存导入来源、分类、启用状态等本地管理信息，不污染 YAML。
+
+## 当前数据
+
+- `dwc3_rk3588.yaml`
+
+`dwc3_rk3588.yaml` 只以 Rockchip 原始文档为寄存器事实来源：
+
+```text
+RK3588 TRM-Part2, Chapter 13 USB3 Controller
+```
+
+生成脚本为 `tools/extract-dwc3-pdf.py`。它同时核对摘要表与详细位域表，并要求位域完整覆盖、位域复位值合成结果与寄存器复位值一致。
+
+## 使用
+
+开发环境需要 Node.js 22+、Rust stable 和对应平台的 Tauri 系统依赖，不再要求 Python 或 PyYAML。安装依赖并运行：
+
+```bash
+npm ci
+npm run dev
+```
+
+构建当前平台的免安装应用：
+
+```bash
+npm run build
+```
+
+统一输出到 `src-tauri/target/release/portable/`：
+
+- macOS：包含 `.app` 的 zip
+- Windows：单文件 `.exe`
+- Linux：单文件 `.AppImage`
+- 所有平台同时生成 `SHA256SUMS.txt`
+
+这些产物无需安装。用户数据仍保存在系统标准应用数据目录，而不是程序旁边；这样可以兼容 macOS App Translocation、Windows 受保护目录和 Linux AppImage 的只读挂载。
+
+在“芯片库”中可以：
+
+- 导入一个或多个 YAML。
+- 关联 YAML 目录；关联文件会在读取芯片库时同步。
+- 导入时自动执行严格规范检查；不合规文件会被拒绝，并逐项显示原因。
+- 编辑芯片分类。
+- 控制芯片是否出现在主界面。
+- 为具体寄存器添加“备注、注意、待确认”三类本地备注。
+- 为芯片关联 PDF、Markdown、文本、图片或其他本地参考文件。
+- 独立勾选需要分享的芯片，并导出单文件 HTML。
+
+导出的 HTML 内联芯片 JSON、CSS、图标和查看器脚本，可以直接双击打开，不依赖 Tauri、Node、服务器或其他文件。
+
+## 寄存器备注
+
+备注是保存在 SQLite 中的独立覆盖层，不会修改 YAML，也不会在重新导入或同步 YAML 时被覆盖。每个寄存器可以保存多条备注；矩阵显示备注标记，悬浮详情和传统表格显示正文，搜索也会匹配备注内容。
+
+备注通过芯片、页面、寄存器地址和名称定位，因此调整 YAML 中寄存器的排列顺序不会影响已有备注。独立 HTML 导出默认包含所选芯片的备注，也可以在芯片库中取消“包含备注”；分享版只读展示备注。
+
+## 芯片附件
+
+附件功能只在 SQLite 中保存芯片与本地文件绝对路径的关联，不复制文件内容。点击附件名称或打开按钮时由操作系统默认应用处理；也可以直接在 Finder 或其他平台的文件管理器中定位原文件。解除附件关联不会删除原文件，文件被移动或删除后会在列表中标记为不可用。
+
+附件始终属于本机资料管理内容。无论独立 HTML 导出时选择哪些芯片，附件路径和文件内容都不会进入导出结果。
+
+## 界面主题
+
+工具内置“跟随系统、清晰亮色、石墨深色、高对比”四种主题。主题选择保存在浏览器或 WebView 的本地存储中，重新打开后继续生效；“跟随系统”会响应操作系统的明暗模式变化。主题只调整颜色令牌，不提供自定义背景图片，避免影响寄存器矩阵和位域信息的辨识。
+
+主题结构参考了开源项目 [GitHub Primer Primitives](https://github.com/primer/primitives) 的语义颜色分层、[Catppuccin Palette](https://github.com/catppuccin/palette) 的完整状态色组织，以及 [Dracula Theme](https://github.com/dracula/dracula-theme) 的深色对比度实践。项目使用自己的配色和组件样式，并未引入这些项目的运行时依赖。
+
+安装后的桌面应用不依赖 Python、Node 或外部 SQLite。桌面端使用已编译进应用的 Rust 校验器，纯 HTML 模式使用页面内置的 JavaScript 校验器。Node 只用于项目构建与自动化测试；Python 仅供可选的 YAML 制作和独立严格校验脚本使用，二者都不会随应用打包，也不要求普通用户安装。
+
+## 跨平台支持
+
+正式支持目标为 macOS 12+、Windows 10/11，以及 Ubuntu 22.04/24.04 和兼容桌面发行版。三平台共享同一套前端、Rust YAML 校验和 bundled SQLite；数据库使用各系统标准应用数据目录。发布形式以免安装包为主，不要求用户运行安装程序。
+
+附件打开与定位使用 Tauri 官方 opener：macOS 使用 Finder，Windows 使用 Shell API，Linux 优先使用 `org.freedesktop.FileManager1` 和桌面 portal。系统文件选择器、窗口标题栏和默认字体会保留平台原生表现，寄存器矩阵、主题、字段解码和操作流程保持一致。
+
+`.github/workflows/cross-platform.yml` 会在 macOS、Windows 和 Ubuntu 上分别运行 Chromium、WebKit、Rust 测试并构建原生安装产物。CI 产物用于兼容性验证，正式对外分发前仍需配置 Apple Developer ID 和 Windows 代码签名证书。
+
+附件与关联 YAML 目录保存本机绝对路径，因此复制数据库到另一台电脑或另一种操作系统后，需要重新关联这些本地文件；芯片数据、分类和备注不受影响。
+
+根目录导入的 YAML、构建生成的 `data/chips.data.js` 和单文件 HTML 默认不会进入 Git。需要发布新的公开内置芯片时，应先确认资料授权，再在 `.gitignore` 中显式放行对应 YAML，并在 Rust 内置芯片表中登记。普通用户导入的 YAML 只保存在本机资料库中。
+
+## YAML 工作流
+
+项目级生成说明位于 `.agents/skills/register-yaml-generator/SKILL.md`，schema 说明位于 `.agents/skills/register-yaml-generator/references/schema.md`。
+
+应用导入 YAML 时会自动严格校验。开发或制作 YAML 时，仍建议提前运行独立校验脚本，以便在导入前修正问题：
+
+```bash
+python3 .agents/skills/register-yaml-generator/scripts/validate_register_yaml.py --strict chip.yaml
+node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js chip.yaml
+npm run data:build
+```
+
+查看器回归测试：
+
+```bash
+npm run test:web
+```
+
+`width` 表示物理字节数，`bit_width` 表示有效位宽，`address_span` 表示占用的地址单位数。前端使用 `BigInt` 解码寄存器值，并为超过 JavaScript 安全整数范围的 YAML 数值保留字符串形式。

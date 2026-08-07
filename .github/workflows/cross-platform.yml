@@ -1,0 +1,105 @@
+name: Cross-platform
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            id: macos
+            os: macos-14
+            build_args: --bundles app
+          - name: Windows
+            id: windows
+            os: windows-2022
+            build_args: --no-bundle
+          - name: Linux
+            id: linux
+            os: ubuntu-22.04
+            build_args: --bundles appimage
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install browsers and Linux browser dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Install browsers
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium webkit
+
+      - name: Test web interface
+        run: npm run test:web
+
+      - name: Test WebKit compatibility
+        run: npm run test:web:webkit
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Build native package
+        run: npm run tauri -- build ${{ matrix.build_args }} -- --locked
+
+      - name: Create portable package
+        run: node tools/package-portable.mjs
+
+      - name: Upload native package
+        uses: actions/upload-artifact@v4
+        with:
+          name: register-reference-${{ matrix.id }}
+          if-no-files-found: error
+          path: src-tauri/target/release/portable/*

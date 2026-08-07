@@ -1,0 +1,23 @@
+{
+  "name": "register-reference",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "data:build": "node tools/build-data.mjs",
+    "web:build": "npm run data:build && node tools/build-web.mjs",
+    "test:web": "npm run web:build && node tools/test-viewer.mjs",
+    "test:web:webkit": "npm run web:build && cross-env BROWSER_ENGINE=webkit node tools/test-viewer.mjs",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build -- --locked && node tools/package-portable.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "cross-env": "10.1.0",
+    "playwright": "1.62.1",
+    "yaml": "2.9.0"
+  },
+  "dependencies": {
+    "lucide": "1.30.0"
+  }
+}
