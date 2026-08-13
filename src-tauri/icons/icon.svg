@@ -1,7 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="184" fill="#15252c"/>
-  <rect x="166" y="166" width="692" height="692" rx="92" fill="#f8faf9"/>
-  <path d="M258 336h508M258 512h508M258 688h508M336 258v508M512 258v508M688 258v508" fill="none" stroke="#b8c4c8" stroke-width="28"/>
-  <rect x="322" y="322" width="380" height="380" rx="42" fill="#00877c"/>
-  <path d="M412 614V410h92c51 0 84 27 84 72 0 30-16 52-43 63l55 69h-67l-46-60h-18v60h-57zm57-108h29c21 0 32-8 32-24s-11-24-32-24h-29v48z" fill="#fff"/>
+  <rect x="64" y="64" width="896" height="896" rx="218" fill="#123B4A"/>
+
+  <!-- PCB traces: three register lanes routed into a chip package. -->
+  <path d="M315 265h92l180 146h42v68h-66L383 333h-68z" fill="#FFFFFF"/>
+  <path d="M315 478h314v68H315z" fill="#FFFFFF"/>
+  <path d="M315 691h68l180-146h66v68h-42L407 759h-92z" fill="#FFFFFF"/>
+
+  <!-- Register-bit pads. -->
+  <path d="M246 216h92l30 30v92l-30 30h-92l-30-30v-92l30-30z" fill="#FFFFFF"/>
+  <rect x="267" y="267" width="50" height="50" rx="8" fill="#123B4A"/>
+  <path d="M246 436h92l30 30v92l-30 30h-92l-30-30v-92l30-30z" fill="#FFFFFF"/>
+  <rect x="267" y="487" width="50" height="50" rx="8" fill="#123B4A"/>
+  <path d="M246 656h92l30 30v92l-30 30h-92l-30-30v-92l30-30z" fill="#FFFFFF"/>
+  <rect x="267" y="707" width="50" height="50" rx="8" fill="#123B4A"/>
+
+  <!-- Cut-corner IC with a die mark and restrained edge pins. -->
+  <path d="M623 320h206l67 67v250l-67 67H623l-67-67V387l67-67z" fill="#FFFFFF"/>
+  <path d="M667 406h118l25 25v162l-25 25H667l-25-25V431l25-25z" fill="#123B4A"/>
+  <circle cx="684" cy="448" r="20" fill="#FFFFFF"/>
+
+  <rect x="604" y="264" width="58" height="64" rx="12" fill="#FFFFFF"/>
+  <rect x="714" y="264" width="58" height="64" rx="12" fill="#FFFFFF"/>
+  <rect x="604" y="696" width="58" height="64" rx="12" fill="#FFFFFF"/>
+  <rect x="714" y="696" width="58" height="64" rx="12" fill="#FFFFFF"/>
+  <rect x="888" y="422" width="64" height="58" rx="12" fill="#FFFFFF"/>
+  <rect x="888" y="544" width="64" height="58" rx="12" fill="#FFFFFF"/>
 </svg>

@@ -90,7 +90,7 @@ pages:
 | `reset` | integer | 可选 | 寄存器复位值，优先使用十六进制 |
 | `desc` | string | 必填 | 寄存器用途和重要行为 |
 | `fields` | list | 可选 | 位域列表；没有可靠位域资料时可省略 |
-| `multi_byte` | boolean | 可选 | 显示 `multi` 标记，适用于多字节联合视图 |
+| `multi_byte` | boolean | 可选 | 标记多字节聚合/联合读取视图；前端不会直接显示该聚合条目 |
 | `read_clear` | boolean | 可选 | 显示 `read-clear` 警示 |
 | `no_dump` | boolean | 可选 | 显示 `no-dump` 警示，标记不应普通遍历读取的端口 |
 | `no_dump_reason` | string | 可选 | 记录不能普通读取的原因；当前 UI 不渲染 |
@@ -157,7 +157,7 @@ desc: "工作模式\n0x00 = 待机\n0x01 = 正常工作\n0x04~0x07 = 保留"
 
 ## 特殊寄存器建模
 
-多字节数据块：设置 `width` 和 `multi_byte: true`，说明字节序；如同时保留单字节条目，给双方添加 `alias_note`。
+多字节数据块：设置 `width` 和 `multi_byte: true`，说明字节序；如同时保留单字节条目，给双方添加 `alias_note`。前端展示时优先使用范围内已有的细粒度物理寄存器；若没有物理条目，则按字节对齐的 `fields` 运行时拆分显示。YAML 中仍应保留聚合定义，以供驱动读取和下游工具使用。
 
 FIFO 或流式数据端口：设置 `no_dump: true` 和 `no_dump_reason`，说明正确读取流程。不要把连续读取次数误写为寄存器 `width`。
 

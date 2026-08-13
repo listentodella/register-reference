@@ -15,9 +15,7 @@
     view: "matrix",
     query: "",
     registerValues: new Map(),
-    hoverPinned: false,
     activeHoverAddress: null,
-    hoverCloseTimer: null,
     loadMessage: "",
     libraryQuery: "",
     libraryOpen: false,
@@ -228,9 +226,167 @@
     return page && Array.isArray(page.registers) ? page.registers : [];
   }
 
+  function addressRange(reg) {
+    const start = Number(reg.addr || 0);
+    return { start, end: start + getAddressSpan(reg) - 1 };
+  }
+
+  function rangesOverlap(left, right) {
+    const a = addressRange(left);
+    const b = addressRange(right);
+    return a.start <= b.end && b.start <= a.end;
+  }
+
+  function extractResetSegment(reg, lo, width, fieldReset) {
+    if (fieldReset !== undefined && fieldReset !== null) return fieldReset;
+    if (reg.reset === undefined || reg.reset === null) return undefined;
+    const parsed = parseInputValue(reg.reset);
+    if (!parsed.ok) return undefined;
+    const mask = (1n << BigInt(width)) - 1n;
+    return formatBigIntHex((parsed.value >> BigInt(lo)) & mask, width);
+  }
+
+  function buildAggregateDisplaySegments(reg, sourceIndex, occupiedAddresses) {
+    const bitWidth = getBitWidth(reg);
+    const addressSpan = getAddressSpan(reg);
+    const bitsPerAddress = bitWidth / addressSpan;
+    const available = new Set();
+    for (let offset = 0; offset < addressSpan; offset += 1) {
+      const addr = Number(reg.addr || 0) + offset;
+      if (!occupiedAddresses.has(addr)) available.add(addr);
+    }
+    if (!available.size) return [];
+
+    const segments = [];
+    const fields = Array.isArray(reg.fields) ? reg.fields : [];
+    if (Number.isInteger(bitsPerAddress) && bitsPerAddress > 0) {
+      fields.forEach((field, fieldIndex) => {
+        const bits = parseBits(field.bits);
+        if (
+          !Number.isFinite(bits.hi) ||
+          !Number.isFinite(bits.lo) ||
+          bits.lo < 0 ||
+          bits.hi < bits.lo ||
+          bits.lo % bitsPerAddress !== 0 ||
+          (bits.hi + 1) % bitsPerAddress !== 0
+        ) {
+          return;
+        }
+
+        const lowUnit = bits.lo / bitsPerAddress;
+        const highUnit = (bits.hi + 1) / bitsPerAddress - 1;
+        const firstOffset = reg.byte_order === "big" ? addressSpan - 1 - highUnit : lowUnit;
+        const lastOffset = reg.byte_order === "big" ? addressSpan - 1 - lowUnit : highUnit;
+        const start = Number(reg.addr || 0) + firstOffset;
+        const end = Number(reg.addr || 0) + lastOffset;
+        const addresses = Array.from({ length: end - start + 1 }, (_item, index) => start + index);
+        if (start < Number(reg.addr || 0) || end >= Number(reg.addr || 0) + addressSpan) return;
+        if (!addresses.every((addr) => available.has(addr))) return;
+
+        addresses.forEach((addr) => available.delete(addr));
+        const localBits = bits.width === 1 ? "0" : `${bits.width - 1}:0`;
+        segments.push({
+          addr: start,
+          name: field.name || `FIELD_${fieldIndex}`,
+          access: field.access || reg.access,
+          width: Math.max(1, Math.ceil(bits.width / 8)),
+          bit_width: bits.width,
+          address_span: addresses.length,
+          byte_order: reg.byte_order,
+          reset: extractResetSegment(reg, bits.lo, bits.width, field.reset),
+          roles: field.roles || reg.roles,
+          read_clear: reg.read_clear,
+          no_dump: reg.no_dump,
+          no_dump_reason: reg.no_dump_reason,
+          desc: field.desc || reg.desc,
+          fields: [{ ...field, bits: localBits }],
+          _displayKey: `aggregate:${sourceIndex}:field:${fieldIndex}`,
+          _displayOrder: sourceIndex + (fieldIndex + 1) / 1000,
+          _aggregateSource: reg,
+        });
+      });
+    }
+
+    Array.from(available)
+      .sort((left, right) => left - right)
+      .forEach((addr) => {
+        const offset = addr - Number(reg.addr || 0);
+        const unitWidth = Number.isInteger(bitsPerAddress) && bitsPerAddress > 0 ? bitsPerAddress : 8;
+        const sourceLo = offset * unitWidth;
+        segments.push({
+          addr,
+          name: `BYTE_${offset}`,
+          access: reg.access,
+          width: Math.max(1, Math.ceil(unitWidth / 8)),
+          bit_width: unitWidth,
+          address_span: 1,
+          reset: extractResetSegment(reg, sourceLo, unitWidth),
+          roles: reg.roles,
+          read_clear: reg.read_clear,
+          no_dump: reg.no_dump,
+          no_dump_reason: reg.no_dump_reason,
+          desc: `批量读取数据的第 ${offset + 1} 个地址单元`,
+          fields: [{ name: "data", bits: unitWidth === 1 ? "0" : `${unitWidth - 1}:0`, desc: reg.desc || "原始数据" }],
+          _displayKey: `aggregate:${sourceIndex}:unit:${offset}`,
+          _displayOrder: sourceIndex + (offset + 1) / 1000,
+          _aggregateSource: reg,
+        });
+      });
+
+    return segments;
+  }
+
+  function getDisplayRegisters() {
+    const source = getRegisters();
+    const physical = source
+      .map((reg, sourceIndex) => ({ reg, sourceIndex }))
+      .filter(({ reg }) => !reg.multi_byte)
+      .map(({ reg, sourceIndex }) => ({ ...reg, _sourceRegisterIndex: sourceIndex, _displayOrder: sourceIndex }));
+    const occupiedAddresses = new Set();
+    physical.forEach((reg) => {
+      const range = addressRange(reg);
+      for (let addr = range.start; addr <= range.end; addr += 1) occupiedAddresses.add(addr);
+    });
+
+    const generated = [];
+    source.forEach((reg, sourceIndex) => {
+      if (!reg.multi_byte) return;
+      const overlappingPhysical = physical.filter((item) => rangesOverlap(item, reg));
+      overlappingPhysical.forEach((item) => {
+        if (item.alias_note && item.alias_note.includes(reg.name || "")) delete item.alias_note;
+      });
+
+      const segments = buildAggregateDisplaySegments(reg, sourceIndex, occupiedAddresses);
+      const noteProxy = segments[0] || overlappingPhysical.sort((left, right) => Number(left.addr) - Number(right.addr))[0];
+      if (noteProxy) {
+        noteProxy._noteAliases = [
+          ...(noteProxy._noteAliases || []),
+          { addr: Number(reg.addr || 0), name: reg.name },
+        ];
+      }
+      generated.push(...segments);
+    });
+
+    return [...physical, ...generated].sort(
+      (left, right) => Number(left.addr || 0) - Number(right.addr || 0) || left._displayOrder - right._displayOrder,
+    );
+  }
+
   function getRegisterKey(reg) {
     const chip = getChip();
-    const registerIndex = getRegisters().indexOf(reg);
+    if (reg._displayKey) {
+      return [
+        chip?._id || chip?.sensor || "chip",
+        state.pageName || "page",
+        "display",
+        reg._displayKey,
+        Number(reg.addr || 0),
+        reg.name || "register",
+      ].join("::");
+    }
+    const registerIndex = Number.isInteger(reg._sourceRegisterIndex)
+      ? reg._sourceRegisterIndex
+      : getRegisters().indexOf(reg);
     return [
       chip?._id || chip?.sensor || "chip",
       state.pageName || "page",
@@ -251,26 +407,35 @@
   function getRegisterNotes(reg) {
     const chip = getChip();
     const notes = Array.isArray(chip?._notes) ? chip._notes : [];
+    const targets = [
+      { addr: Number(reg.addr || 0), name: reg.name },
+      ...(Array.isArray(reg._noteAliases) ? reg._noteAliases : []),
+    ];
     return notes.filter(
       (note) =>
         note.pageName === state.pageName &&
-        Number(note.registerAddr) === Number(reg.addr || 0) &&
-        note.registerName === reg.name,
+        targets.some(
+          (target) => Number(note.registerAddr) === Number(target.addr) && note.registerName === target.name,
+        ),
     );
   }
 
   function countPageNotes() {
-    return getRegisters().reduce((count, reg) => count + getRegisterNotes(reg).length, 0);
+    const chip = getChip();
+    const notes = Array.isArray(chip?._notes) ? chip._notes : [];
+    return notes.filter((note) => note.pageName === state.pageName).length;
   }
 
   function renderNoteEditButton(reg) {
     if (!isDesktopApp()) return "";
     const count = getRegisterNotes(reg).length;
-    const label = count ? `管理 ${count} 条备注` : "添加备注";
+    const registerName = reg.name || "寄存器";
+    const label = count ? `管理 ${registerName} 的 ${count} 条备注` : `为 ${registerName} 添加备注`;
     return `
       <button class="note-edit-button ${count ? "has-notes" : ""}" type="button"
         data-note-register-key="${escapeHtml(getRegisterKey(reg))}" title="${label}" aria-label="${label}">
         <i data-lucide="${count ? "notebook-pen" : "sticky-note"}"></i>
+        <span class="note-edit-count" aria-hidden="true">${count || "+"}</span>
       </button>
     `;
   }
@@ -502,7 +667,7 @@
   function summarizePage() {
     const chip = getChip();
     const page = getPage();
-    const regs = getRegisters();
+    const regs = getDisplayRegisters();
     if (!chip || !page) {
       els.chipMeta.textContent = "未加载芯片";
       els.statusBand.textContent = state.loadMessage || "请选择 YAML 文件或目录";
@@ -550,7 +715,7 @@
   }
 
   function renderMatrix() {
-    const regs = getRegisters();
+    const regs = getDisplayRegisters();
     const query = state.query.trim().toLowerCase();
     const index = buildRegisterIndex(regs);
     const rowBases = Array.from(new Set(Array.from(index.keys(), (addr) => Math.floor(addr / 16) * 16))).sort((a, b) => a - b);
@@ -590,11 +755,14 @@
 
         const names = displayRegs.slice(0, 2).map((reg) => reg.name).join(" / ");
         const extra = displayRegs.length > 2 ? ` +${displayRegs.length - 2}` : "";
-        const dataRegs = hasRegister ? `data-address="${addr}" tabindex="0"` : "";
+        const isOpen = hasRegister && state.activeHoverAddress === addr && !els.hoverPanel.hidden;
+        const dataRegs = hasRegister
+          ? `data-address="${addr}" tabindex="0" role="button" aria-haspopup="true" aria-expanded="${isOpen ? "true" : "false"}" title="单击查看详情"`
+          : "";
         const access = hasRegister ? displayRegs[0].access || "" : "";
 
         cells.push(`
-          <div class="${cellClass}" ${dataRegs}>
+          <div class="${cellClass}${isOpen ? " is-open" : ""}" ${dataRegs}>
             <div class="cell-address">
               <strong>${formatHex(addr)}</strong>
               ${hasRegister ? `<span class="access-pill ${escapeHtml(String(access).toLowerCase())}">${escapeHtml(access)}</span>` : ""}
@@ -614,19 +782,6 @@
     els.matrixSummary.textContent = `${visible}/${regs.length} 个寄存器匹配 · ${rowBases.length} 个有效地址行`;
     els.matrixGrid.innerHTML = cells.join("");
     refreshIcons(els.matrixGrid);
-
-    els.matrixGrid.querySelectorAll(".has-register").forEach((cell) => {
-      cell.addEventListener("mouseenter", showHoverPanel);
-      cell.addEventListener("mouseover", showHoverPanel);
-      cell.addEventListener("pointerover", showHoverPanel);
-      cell.addEventListener("mousemove", moveHoverPanel);
-      cell.addEventListener("pointermove", moveHoverPanel);
-      cell.addEventListener("click", showHoverPanel);
-      cell.addEventListener("mouseleave", scheduleHideHoverPanel);
-      cell.addEventListener("pointerleave", scheduleHideHoverPanel);
-      cell.addEventListener("focus", showHoverPanel);
-      cell.addEventListener("blur", scheduleHideHoverPanel);
-    });
   }
 
   function renderBitLane(reg, valueInfo) {
@@ -717,7 +872,7 @@
       <div class="register-block register-display" data-register-key="${escapeHtml(key)}">
         <div class="register-heading">
           <h3>${escapeHtml(reg.name)} <span class="addr-cell">${formatRange(reg)}</span></h3>
-          ${renderNoteEditButton(reg)}
+          ${compact ? "" : renderNoteEditButton(reg)}
         </div>
         <div class="hover-meta">
           ${renderBadges(reg)}
@@ -733,7 +888,7 @@
   }
 
   function relatedRegsForAddress(addr) {
-    const regs = getRegisters();
+    const regs = getDisplayRegisters();
     return regs.filter((reg) => {
       const start = Number(reg.addr || 0);
       const end = start + getAddressSpan(reg) - 1;
@@ -741,97 +896,164 @@
     });
   }
 
-  function renderHoverPanelContent(regs) {
-    const modeText = state.hoverPinned ? "锁定" : "预览";
+  function getDetailNoteTarget(regs, addr) {
+    return regs.find((reg) => Number(reg.addr || 0) === addr) || regs[0] || null;
+  }
+
+  function renderHoverPanelContent(regs, addr) {
+    const noteTarget = getDetailNoteTarget(regs, addr);
     return `
-      <div class="hover-panel-bar">
-        <span>${modeText}</span>
-        <button class="hover-close" type="button" aria-label="关闭详情窗口">×</button>
+      <div class="hover-panel-caret" aria-hidden="true"></div>
+      <div class="hover-panel-body">
+        <div class="hover-panel-bar">
+          <div class="hover-panel-actions">
+            <button class="hover-close close-button" type="button" title="关闭详情" aria-label="关闭详情窗口">
+              <i data-lucide="x"></i>
+            </button>
+            ${noteTarget ? renderNoteEditButton(noteTarget) : ""}
+          </div>
+          <span>再点该寄存器或按 Esc 关闭</span>
+        </div>
+        ${regs.map((reg) => renderRegisterBlock(reg, true)).join("")}
       </div>
-      ${regs.map((reg) => renderRegisterBlock(reg, true)).join("")}
     `;
   }
 
-  function cancelHoverClose() {
-    if (state.hoverCloseTimer) {
-      window.clearTimeout(state.hoverCloseTimer);
-      state.hoverCloseTimer = null;
-    }
+  function getOpenRegisterCell() {
+    if (state.activeHoverAddress == null) return null;
+    return els.matrixGrid.querySelector(`.has-register[data-address="${state.activeHoverAddress}"]`);
   }
 
-  function showHoverPanel(event) {
-    cancelHoverClose();
+  function syncOpenCellHighlight() {
+    els.matrixGrid.querySelectorAll(".reg-cell.is-open").forEach((cell) => {
+      cell.classList.remove("is-open");
+      if (cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
+    });
+    const cell = getOpenRegisterCell();
+    if (!cell || els.hoverPanel.hidden) return;
+    cell.classList.add("is-open");
+    cell.setAttribute("aria-expanded", "true");
+  }
 
-    const addr = Number(event.currentTarget.dataset.address);
+  function positionDetailPanel(anchor) {
+    const panel = els.hoverPanel;
+    if (panel.hidden || !anchor) return;
+
+    const margin = 10;
+    const gap = 10;
+    const cell = anchor.getBoundingClientRect();
+    const rect = panel.getBoundingClientRect();
+    const width = rect.width || Math.min(560, window.innerWidth - 28);
+    const height = rect.height || Math.min(window.innerHeight * 0.82, 720);
+    const viewWidth = window.innerWidth;
+    const viewHeight = window.innerHeight;
+
+    const clamp = (left, top) => ({
+      left: Math.min(Math.max(margin, left), Math.max(margin, viewWidth - width - margin)),
+      top: Math.min(Math.max(margin, top), Math.max(margin, viewHeight - height - margin)),
+    });
+    const fitsHorizontally = (left) => left >= margin && left + width <= viewWidth - margin;
+    const fitsVertically = (top) => top >= margin && top + height <= viewHeight - margin;
+
+    const rightLeft = cell.right + gap;
+    const leftLeft = cell.left - width - gap;
+    const bottomTop = cell.bottom + gap;
+    const topTop = cell.top - height - gap;
+    let chosen;
+    if (fitsHorizontally(rightLeft)) {
+      chosen = { placement: "right", left: rightLeft, top: clamp(rightLeft, cell.top).top };
+    } else if (fitsHorizontally(leftLeft)) {
+      chosen = { placement: "left", left: leftLeft, top: clamp(leftLeft, cell.top).top };
+    } else if (fitsVertically(bottomTop)) {
+      chosen = { placement: "bottom", left: clamp(cell.left, bottomTop).left, top: bottomTop };
+    } else if (fitsVertically(topTop)) {
+      chosen = { placement: "top", left: clamp(cell.left, topTop).left, top: topTop };
+    } else if (viewWidth - cell.right >= cell.left) {
+      chosen = { placement: "right", ...clamp(rightLeft, cell.top) };
+    } else {
+      chosen = { placement: "left", ...clamp(leftLeft, cell.top) };
+    }
+
+    panel.dataset.placement = chosen.placement;
+    panel.style.left = `${Math.round(chosen.left)}px`;
+    panel.style.top = `${Math.round(chosen.top)}px`;
+    const anchorCenter = cell.left + cell.width / 2;
+    const panelCenter = chosen.left + width / 2;
+    panel.dataset.actionSide = chosen.placement === "right"
+      ? "left"
+      : chosen.placement === "left"
+        ? "right"
+        : anchorCenter <= panelCenter
+          ? "left"
+          : "right";
+
+    const caretSize = 10;
+    const caretPad = 14;
+    const caretOffset = chosen.placement === "right" || chosen.placement === "left"
+      ? cell.top + cell.height / 2 - chosen.top - caretSize / 2
+      : cell.left + cell.width / 2 - chosen.left - caretSize / 2;
+    const maxOffset = Math.max(
+      caretPad,
+      (chosen.placement === "right" || chosen.placement === "left" ? height : width) - caretPad - caretSize,
+    );
+    panel.style.setProperty(
+      "--caret-offset",
+      `${Math.round(Math.min(Math.max(caretPad, caretOffset), maxOffset))}px`,
+    );
+  }
+
+  function showDetailPanel(addr, anchor, { focusPanel = false } = {}) {
     const regs = relatedRegsForAddress(addr);
     if (!regs.length) return;
 
-    const shouldPin = event.type === "click";
-    if (state.hoverPinned && !shouldPin) return;
-
-    if (!shouldPin && state.activeHoverAddress === addr && !els.hoverPanel.hidden) {
-      moveHoverPanel(event);
-      return;
-    }
-
-    state.hoverPinned = shouldPin;
     state.activeHoverAddress = addr;
-    els.hoverPanel.classList.toggle("pinned", state.hoverPinned);
-    els.hoverPanel.innerHTML = renderHoverPanelContent(regs);
+    els.hoverPanel.innerHTML = renderHoverPanelContent(regs, addr);
     refreshIcons(els.hoverPanel);
     els.hoverPanel.hidden = false;
     els.hoverPanel.setAttribute("tabindex", "-1");
-    moveHoverPanel(event, true);
-
-    if (state.hoverPinned) {
-      els.hoverPanel.focus({ preventScroll: true });
+    syncOpenCellHighlight();
+    positionDetailPanel(anchor || getOpenRegisterCell());
+    if (focusPanel) {
+      els.hoverPanel.querySelector(".hover-close")?.focus({ preventScroll: true });
     }
   }
 
-  function moveHoverPanel(event, force = false) {
-    const panel = els.hoverPanel;
-    if (panel.hidden) return;
-    if (state.hoverPinned && !force) return;
-
-    const x = event.clientX || event.currentTarget.getBoundingClientRect().right;
-    const y = event.clientY || event.currentTarget.getBoundingClientRect().top;
-    const margin = 14;
-    const rect = panel.getBoundingClientRect();
-    let left = x + margin;
-    let top = y + margin;
-
-    if (left + rect.width > window.innerWidth - margin) {
-      left = Math.max(margin, x - rect.width - margin);
-    }
-    if (top + rect.height > window.innerHeight - margin) {
-      top = Math.max(margin, window.innerHeight - rect.height - margin);
-    }
-
-    panel.style.left = `${left}px`;
-    panel.style.top = `${top}px`;
-  }
-
-  function hideHoverPanel(force = false) {
-    if (state.hoverPinned && !force) return;
-    cancelHoverClose();
-    state.hoverPinned = false;
+  function hideHoverPanel() {
     state.activeHoverAddress = null;
-    els.hoverPanel.classList.remove("pinned");
     els.hoverPanel.hidden = true;
+    els.hoverPanel.innerHTML = "";
+    syncOpenCellHighlight();
   }
 
-  function scheduleHideHoverPanel() {
-    if (state.hoverPinned) return;
-    cancelHoverClose();
-    state.hoverCloseTimer = window.setTimeout(() => {
-      if (!els.hoverPanel.matches(":hover")) {
-        hideHoverPanel(true);
-      }
-    }, 180);
+  function repositionOrHideDetailPanel() {
+    if (els.hoverPanel.hidden) return;
+    const cell = getOpenRegisterCell();
+    if (!cell) {
+      hideHoverPanel();
+      return;
+    }
+    const rect = cell.getBoundingClientRect();
+    const visible =
+      rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+    if (!visible) {
+      hideHoverPanel();
+      return;
+    }
+    positionDetailPanel(cell);
+  }
+
+  function handleRegisterCellActivate(cell, { viaKeyboard = false } = {}) {
+    const addr = Number(cell.dataset.address);
+    if (!Number.isFinite(addr)) return;
+    if (state.activeHoverAddress === addr && !els.hoverPanel.hidden) {
+      hideHoverPanel();
+      return;
+    }
+    showDetailPanel(addr, cell, { focusPanel: viaKeyboard });
   }
 
   function renderTable() {
-    const regs = getRegisters();
+    const regs = getDisplayRegisters();
     const query = state.query.trim().toLowerCase();
     const rows = regs.filter((reg) => registerMatchesQuery(reg, query));
 
@@ -872,7 +1094,7 @@
   }
 
   function findRegisterByKey(key) {
-    return getRegisters().find((reg) => getRegisterKey(reg) === key) || null;
+    return getDisplayRegisters().find((reg) => getRegisterKey(reg) === key) || null;
   }
 
   function refreshRegisterValueDisplays(reg, key, sourceInput) {
@@ -920,7 +1142,7 @@
   }
 
   function render() {
-    hideHoverPanel(true);
+    hideHoverPanel();
     updateAttachmentsButton();
     summarizePage();
     renderMatrix();
@@ -1116,7 +1338,7 @@
     state.noteRegisterKey = registerKey;
     const reg = getActiveNoteRegister();
     if (!reg) return;
-    hideHoverPanel(true);
+    hideHoverPanel();
     els.noteDialogRegister.textContent = `${state.pageName} · ${formatRange(reg)} · ${reg.name}`;
     resetNoteEditor();
     renderNoteList();
@@ -1420,6 +1642,7 @@
   }
 
   function openLibrary() {
+    hideHoverPanel();
     state.libraryOpen = true;
     els.libraryBackdrop.hidden = false;
     document.body.classList.add("library-open");
@@ -1711,7 +1934,7 @@
     els.matrixView.classList.toggle("hidden", view !== "matrix");
     els.tableView.classList.toggle("hidden", view !== "table");
     els.viewButtons.forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-    hideHoverPanel(true);
+    hideHoverPanel();
   }
 
   function bindEvents() {
@@ -1847,20 +2070,35 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
-    els.hoverPanel.addEventListener("mouseenter", cancelHoverClose);
-    els.hoverPanel.addEventListener("pointerenter", cancelHoverClose);
-    els.hoverPanel.addEventListener("mouseleave", scheduleHideHoverPanel);
-    els.hoverPanel.addEventListener("pointerleave", scheduleHideHoverPanel);
+    els.matrixGrid.addEventListener("click", (event) => {
+      const cell = event.target.closest(".has-register");
+      if (!cell || !els.matrixGrid.contains(cell)) return;
+      handleRegisterCellActivate(cell);
+    });
+    els.matrixGrid.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const cell = event.target.closest(".has-register");
+      if (!cell || !els.matrixGrid.contains(cell)) return;
+      event.preventDefault();
+      handleRegisterCellActivate(cell, { viaKeyboard: true });
+    });
+
     els.hoverPanel.addEventListener("input", handleRegisterValueInput);
     els.hoverPanel.addEventListener("click", (event) => {
       if (handleNoteEditButton(event)) return;
-      if (event.target.closest(".hover-close")) {
-        hideHoverPanel(true);
-      }
+      if (event.target.closest(".hover-close")) hideHoverPanel();
     });
 
     els.tableBody.addEventListener("input", handleRegisterValueInput);
     els.tableBody.addEventListener("click", handleNoteEditButton);
+
+    document.addEventListener("click", (event) => {
+      if (els.hoverPanel.hidden) return;
+      if (els.hoverPanel.contains(event.target)) return;
+      if (event.target.closest("#matrixGrid .has-register")) return;
+      if (event.target.closest("dialog[open], .library-backdrop:not([hidden]), .theme-menu, .theme-button")) return;
+      hideHoverPanel();
+    });
 
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -1870,12 +2108,12 @@
         }
         if (els.noteDialog.open || els.attachmentsDialog.open || els.importResultDialog.open) return;
         if (state.libraryOpen) closeLibrary();
-        else hideHoverPanel(true);
+        else hideHoverPanel();
       }
     });
 
-    window.addEventListener("scroll", () => hideHoverPanel(false), { passive: true });
-    window.addEventListener("resize", () => hideHoverPanel(true));
+    window.addEventListener("scroll", repositionOrHideDetailPanel, { capture: true, passive: true });
+    window.addEventListener("resize", repositionOrHideDetailPanel);
   }
 
   function init() {

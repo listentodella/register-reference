@@ -55,10 +55,72 @@ try {
   assert.match(await page.locator("#statusBand").innerText(), /57 个寄存器/);
   assert.equal(await page.locator("#matrixGrid .reg-cell").count(), 352);
   assert.equal(await page.locator("#matrixGrid .address-gap").count(), 8);
-  await page.locator("#matrixGrid .has-register").first().hover();
+  const firstRegisterCell = page.locator("#matrixGrid .has-register:not(.covered-only)").first();
+  const otherRegisterCell = page.locator("#matrixGrid .has-register:not(.covered-only)").nth(2);
+  const rightRegisterCell = page.locator('#matrixGrid .has-register[data-address="49420"]');
+  await firstRegisterCell.hover();
+  assert.equal(await page.locator("#hoverPanel").isHidden(), true);
+  await firstRegisterCell.click();
   await page.waitForSelector("#hoverPanel:not([hidden])");
+  assert.equal(await page.locator("#hoverPanel .hover-close svg").count(), 1);
+  assert.equal(await page.locator("#hoverPanel .hover-panel-actions").count(), 1);
   assert.equal(await page.locator("#hoverPanel .bit-box").count(), 32);
   assert.equal(await page.locator("#hoverPanel .register-value-input").first().inputValue(), "0x00000001");
+  assert.equal(await page.locator("#matrixGrid .reg-cell.is-open").count(), 1);
+  const firstCellBox = await firstRegisterCell.boundingBox();
+  const panelBox = await page.locator("#hoverPanel").boundingBox();
+  const panelGap = Math.min(
+    Math.abs(panelBox.x - (firstCellBox.x + firstCellBox.width)),
+    Math.abs(firstCellBox.x - (panelBox.x + panelBox.width)),
+    Math.abs(panelBox.y - (firstCellBox.y + firstCellBox.height)),
+    Math.abs(firstCellBox.y - (panelBox.y + panelBox.height)),
+  );
+  assert.ok(panelGap < 24, `detail panel should sit next to the cell, gap=${panelGap}`);
+  assert.equal(await page.locator("#hoverPanel").getAttribute("data-action-side"), "left");
+  await firstRegisterCell.click();
+  await page.locator("#hoverPanel").waitFor({ state: "hidden" });
+  await rightRegisterCell.click();
+  await page.waitForSelector("#hoverPanel:not([hidden])");
+  assert.equal(await page.locator("#hoverPanel").getAttribute("data-placement"), "left");
+  assert.equal(await page.locator("#hoverPanel").getAttribute("data-action-side"), "right");
+  const rightCellBox = await rightRegisterCell.boundingBox();
+  const actionBox = await page.locator("#hoverPanel .hover-panel-actions").boundingBox();
+  assert.ok(
+    Math.abs(rightCellBox.x - (actionBox.x + actionBox.width)) < 40,
+    "detail actions should stay near the right-side anchor",
+  );
+  await rightRegisterCell.click();
+  await page.locator("#hoverPanel").waitFor({ state: "hidden" });
+  await firstRegisterCell.click();
+  await page.waitForSelector("#hoverPanel:not([hidden])");
+  await otherRegisterCell.hover({ force: true });
+  assert.equal(await page.locator("#hoverPanel").isHidden(), false);
+  await otherRegisterCell.click({ force: true });
+  assert.equal(
+    await page.locator("#matrixGrid .reg-cell.is-open").getAttribute("data-address"),
+    await otherRegisterCell.getAttribute("data-address"),
+  );
+  await page.keyboard.press("Escape");
+  await page.locator("#hoverPanel").waitFor({ state: "hidden" });
+  await firstRegisterCell.click();
+  await page.waitForSelector("#hoverPanel:not([hidden])");
+  await page.locator(".brand").click();
+  await page.locator("#hoverPanel").waitFor({ state: "hidden" });
+  await firstRegisterCell.click();
+  await page.waitForSelector("#hoverPanel:not([hidden])");
+
+  await page.selectOption("#chipSelect", { label: "QMI8660" });
+  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /INT_HELPER|DATA_ALL/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="88"]').innerText(), /INT_STATUS0/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="96"]').innerText(), /gyr/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="102"]').innerText(), /acc/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="108"]').innerText(), /tmp/);
+  await page.selectOption("#pageSelect", { label: "OIS" });
+  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /DATA_ALL/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="82"]').innerText(), /gyr/);
+  await page.selectOption("#chipSelect", { label: "QMA6100P" });
+  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /ACC_DATA/);
+  assert.match(await page.locator('#matrixGrid .has-register[data-address="1"]').innerText(), /X_OUT_LSB/);
 
   const yaml64 = `schema_version: 1
 sensor: TEST64
@@ -87,6 +149,37 @@ pages:
             access: RW
             reset: 0xFEDCBA9876543210
             desc: "full value"
+      - addr: 0x2C
+        name: BLOCK_DATA
+        access: RO
+        width: 4
+        bit_width: 32
+        address_span: 4
+        multi_byte: true
+        alias_note: "overlaps BYTE3"
+        desc: "aggregate view"
+      - addr: 0x2F
+        name: BYTE3
+        access: RO
+        width: 1
+        alias_note: "overlaps BLOCK_DATA"
+        desc: "physical byte view"
+      - addr: 0x30
+        name: SENSOR_BURST
+        access: RO
+        width: 14
+        multi_byte: true
+        desc: "aggregate sensor view"
+        fields:
+          - name: gyr
+            bits: "47:0"
+            desc: "gyroscope data"
+          - name: acc
+            bits: "95:48"
+            desc: "accelerometer data"
+          - name: tmp
+            bits: "111:96"
+            desc: "temperature data"
 `;
 
   await page.setInputFiles("#yamlFileInput", {
@@ -96,8 +189,24 @@ pages:
   });
   await page.waitForTimeout(100);
   assert.equal(await page.locator("#chipSelect option:checked").innerText(), "TEST64");
-  assert.equal(await page.locator("#matrixGrid .reg-cell").count(), 16);
-  await page.locator("#matrixGrid .has-register").hover();
+  assert.equal(await page.locator("#matrixGrid .reg-cell").count(), 32);
+  assert.equal(await page.locator('#matrixGrid .has-register', { hasText: "BLOCK_DATA" }).count(), 0);
+  assert.equal(await page.locator('#matrixGrid .has-register', { hasText: "SENSOR_BURST" }).count(), 0);
+  assert.equal(await page.locator('#matrixGrid .has-register[data-address="44"]', { hasText: "BYTE_0" }).count(), 1);
+  assert.equal(await page.locator('#matrixGrid .has-register[data-address="47"]', { hasText: "BYTE3" }).count(), 1);
+  assert.equal(await page.locator('#matrixGrid .has-register[data-address="48"]', { hasText: "gyr" }).count(), 1);
+  assert.equal(await page.locator('#matrixGrid .has-register[data-address="54"]', { hasText: "acc" }).count(), 1);
+  assert.equal(await page.locator('#matrixGrid .has-register[data-address="60"]', { hasText: "tmp" }).count(), 1);
+  await page.locator('#matrixGrid .has-register[data-address="48"]').click();
+  assert.equal(await page.locator("#hoverPanel .register-block").count(), 1);
+  assert.match(await page.locator("#hoverPanel .register-heading").innerText(), /gyr/);
+  assert.match(await page.locator("#hoverPanel .hover-meta").innerText(), /48 bit/);
+  await page.locator("#hoverPanel .hover-close").click();
+  await page.locator("#tableViewButton").click();
+  assert.equal(await page.locator("#registerTableBody tr").count(), 8);
+  assert.doesNotMatch(await page.locator("#registerTableBody").innerText(), /BLOCK_DATA|SENSOR_BURST/);
+  await page.locator("#matrixViewButton").click();
+  await page.locator('#matrixGrid .has-register[data-address="32"]').click();
   await page.waitForSelector("#hoverPanel:not([hidden])");
   assert.equal(await page.locator("#hoverPanel .register-value-input").inputValue(), "0xFEDCBA9876543210");
   assert.equal(await page.locator("#hoverPanel .bit-box").count(), 64);
@@ -175,7 +284,25 @@ pages:
   );
   await notesPage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   await notesPage.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "TEST64");
-  await notesPage.locator("#matrixGrid .has-register").click();
+  const aliasCell = notesPage.locator('#matrixGrid .has-register[data-address="47"]');
+  await aliasCell.click();
+  assert.equal(await notesPage.locator("#hoverPanel .register-block").count(), 1);
+  assert.equal(await notesPage.locator("#hoverPanel .note-edit-button").count(), 1);
+  assert.match(await notesPage.locator("#hoverPanel .note-edit-button").getAttribute("aria-label"), /BYTE3/);
+  const closeBox = await notesPage.locator("#hoverPanel .hover-close").boundingBox();
+  const noteBox = await notesPage.locator("#hoverPanel .note-edit-button").boundingBox();
+  assert.ok(closeBox.x > noteBox.x, "close button should be nearest to the right-side anchor");
+  await notesPage.locator("#hoverPanel .hover-close").click();
+  await notesPage.locator('#matrixGrid .has-register[data-address="32"]').click();
+  const firstCloseBox = await notesPage.locator("#hoverPanel .hover-close").boundingBox();
+  const firstNoteBox = await notesPage.locator("#hoverPanel .note-edit-button").boundingBox();
+  assert.ok(firstCloseBox.x < firstNoteBox.x, "close button should be nearest to the left-side anchor");
+  assert.equal(await notesPage.locator("#hoverPanel .note-edit-count").innerText(), "+");
+  const controlColors = await notesPage.locator("#hoverPanel").evaluate((panel) => ({
+    note: getComputedStyle(panel.querySelector(".note-edit-button")).backgroundColor,
+    close: getComputedStyle(panel.querySelector(".hover-close")).backgroundColor,
+  }));
+  assert.notEqual(controlColors.note, controlColors.close);
   await notesPage.locator("#hoverPanel .note-edit-button").click();
   await notesPage.waitForSelector("#noteDialog[open]");
   await notesPage.locator('[data-note-kind="warning"]').click();
@@ -186,6 +313,9 @@ pages:
   await notesPage.locator("#noteDialogCloseButton").click();
   assert.equal(await notesPage.locator("#matrixGrid .cell-note-indicator").count(), 1);
   assert.match(await notesPage.locator("#statusBand").innerText(), /1 条备注/);
+  await notesPage.locator('#matrixGrid .has-register[data-address="32"]').click();
+  assert.equal(await notesPage.locator("#hoverPanel .note-edit-count").innerText(), "1");
+  await notesPage.locator("#hoverPanel .hover-close").click();
 
   await notesPage.locator("#searchInput").fill("状态稳定");
   assert.equal(await notesPage.locator("#matrixGrid .has-register:not(.filtered-out)").count(), 1);

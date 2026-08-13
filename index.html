@@ -11,7 +11,7 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark">REG</div>
+          <img class="brand-mark" src="favicon.png" alt="">
           <div>
             <h1>寄存器速查工具</h1>
             <p id="chipMeta">加载中</p>
@@ -123,7 +123,7 @@
         </section>
       </main>
 
-      <div id="hoverPanel" class="hover-panel" hidden></div>
+      <div id="hoverPanel" class="hover-panel" hidden role="region" aria-label="寄存器详情"></div>
 
       <div id="libraryBackdrop" class="library-backdrop" hidden>
         <aside id="libraryPanel" class="library-panel" role="dialog" aria-modal="true" aria-labelledby="libraryTitle">
@@ -132,7 +132,7 @@
               <h2 id="libraryTitle">芯片库</h2>
               <p id="librarySummary"></p>
             </div>
-            <button id="libraryCloseButton" class="icon-button" type="button" title="关闭芯片库" aria-label="关闭芯片库">
+            <button id="libraryCloseButton" class="icon-button close-button" type="button" title="关闭芯片库" aria-label="关闭芯片库">
               <i data-lucide="x"></i>
             </button>
           </header>
@@ -177,7 +177,7 @@
             <h2 id="attachmentsDialogTitle">芯片附件</h2>
             <p id="attachmentsDialogChip"></p>
           </div>
-          <button id="attachmentsDialogCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+          <button id="attachmentsDialogCloseButton" class="icon-button close-button" type="button" title="关闭" aria-label="关闭">
             <i data-lucide="x"></i>
           </button>
         </header>
@@ -199,7 +199,7 @@
             <h2 id="noteDialogTitle">寄存器备注</h2>
             <p id="noteDialogRegister"></p>
           </div>
-          <button id="noteDialogCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+          <button id="noteDialogCloseButton" class="icon-button close-button" type="button" title="关闭" aria-label="关闭">
             <i data-lucide="x"></i>
           </button>
         </header>
@@ -239,7 +239,7 @@
             <h2 id="importResultTitle">YAML 未导入</h2>
             <p id="importResultSummary"></p>
           </div>
-          <button id="importResultCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭">
+          <button id="importResultCloseButton" class="icon-button close-button" type="button" title="关闭" aria-label="关闭">
             <i data-lucide="x"></i>
           </button>
         </header>

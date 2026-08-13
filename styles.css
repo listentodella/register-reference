@@ -29,10 +29,12 @@
   --amber-soft: #fff1d7;
   --amber-border: #e0b56e;
   --amber-ink: #805300;
+  --amber-contrast: #ffffff;
   --red: #bf3f3f;
   --red-soft: #ffe8e6;
   --red-border: #e0a19c;
   --red-ink: #71312f;
+  --red-contrast: #ffffff;
   --blue: #3267a8;
   --blue-soft: #e8f0fb;
   --blue-border: #9eb9d8;
@@ -99,10 +101,12 @@
   --amber-soft: #3c2e16;
   --amber-border: #b98635;
   --amber-ink: #ffd37e;
+  --amber-contrast: #281900;
   --red: #ff7b72;
   --red-soft: #3d2223;
   --red-border: #b65353;
   --red-ink: #ffb4ae;
+  --red-contrast: #260606;
   --blue: #78b7ff;
   --blue-soft: #1d3048;
   --blue-border: #4d82bd;
@@ -168,10 +172,12 @@
   --amber-soft: #3d3300;
   --amber-border: #ffd60a;
   --amber-ink: #fff0a3;
+  --amber-contrast: #000000;
   --red: #ff6b6b;
   --red-soft: #470d0d;
   --red-border: #ff6b6b;
   --red-ink: #ffd1d1;
+  --red-contrast: #000000;
   --blue: #62b3ff;
   --blue-soft: #082a4a;
   --blue-border: #62b3ff;
@@ -262,15 +268,10 @@ button {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
   width: 44px;
   height: 44px;
-  border-radius: 8px;
-  background: var(--brand-bg);
-  color: var(--brand-text);
-  font-weight: 700;
-  font-size: 13px;
+  flex: 0 0 44px;
+  object-fit: contain;
 }
 
 h1,
@@ -687,14 +688,20 @@ main {
 
 .reg-cell.has-register {
   border-color: var(--line-strong);
+  cursor: pointer;
 }
 
 .reg-cell.has-register:hover,
-.reg-cell.has-register:focus-visible {
+.reg-cell.has-register:focus-visible,
+.reg-cell.has-register.is-open {
   border-color: var(--accent);
   box-shadow: var(--shadow-accent);
   transform: translateY(-1px);
   outline: none;
+}
+
+.reg-cell.has-register.is-open {
+  z-index: 1;
 }
 
 .reg-cell.empty {
@@ -852,19 +859,57 @@ main {
   position: fixed;
   z-index: 80;
   width: min(560px, calc(100vw - 28px));
-  max-height: min(82vh, 720px);
-  overflow: auto;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  padding: 0 12px 12px;
+  overflow: visible;
   outline: none;
 }
 
-.hover-panel.pinned {
-  border-color: var(--accent);
+.hover-panel-caret {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  transform: rotate(45deg);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.hover-panel[data-placement="right"] .hover-panel-caret {
+  left: -6px;
+  top: var(--caret-offset);
+  border-right: 0;
+  border-top: 0;
+}
+
+.hover-panel[data-placement="left"] .hover-panel-caret {
+  right: -6px;
+  top: var(--caret-offset);
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.hover-panel[data-placement="bottom"] .hover-panel-caret {
+  top: -6px;
+  left: var(--caret-offset);
+  border-left: 0;
+  border-top: 0;
+}
+
+.hover-panel[data-placement="top"] .hover-panel-caret {
+  bottom: -6px;
+  left: var(--caret-offset);
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.hover-panel-body {
+  max-height: min(82vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
   box-shadow: var(--shadow-accent);
+  padding: 0 12px 12px;
 }
 
 .hover-panel-bar {
@@ -881,28 +926,60 @@ main {
   background: var(--hoverbar-bg);
 }
 
+.hover-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.hover-panel[data-action-side="right"] .hover-panel-bar {
+  flex-direction: row-reverse;
+}
+
+.hover-panel[data-action-side="right"] .hover-panel-actions {
+  flex-direction: row-reverse;
+}
+
 .hover-panel-bar span {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hover-close {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--line);
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--red-border);
   border-radius: 6px;
-  background: var(--control-bg);
-  color: var(--subtle-text);
-  line-height: 1;
+  background: var(--red-soft);
+  color: var(--red-ink);
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .hover-close:hover,
 .hover-close:focus-visible {
-  border-color: var(--accent);
-  color: var(--accent-ink);
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--red-contrast);
+  box-shadow: 0 0 0 3px var(--red-soft);
   outline: none;
+}
+
+.hover-close:active {
+  transform: scale(0.94);
+}
+
+.hover-close svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2.4;
 }
 
 .hover-panel h3 {
@@ -923,29 +1000,72 @@ main {
 }
 
 .note-edit-button {
+  position: relative;
   display: inline-grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
-  border: 1px solid var(--line);
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--amber-border);
   border-radius: 6px;
-  background: var(--control-bg);
-  color: var(--muted);
+  background: var(--note-soft);
+  color: var(--amber-ink);
+  box-shadow: 0 0 0 2px transparent;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .note-edit-button:hover,
-.note-edit-button:focus-visible,
-.note-edit-button.has-notes {
-  border-color: var(--note-border);
-  background: var(--note-soft);
-  color: var(--amber-ink);
+.note-edit-button:focus-visible {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: var(--amber-contrast);
+  box-shadow: 0 0 0 3px var(--amber-soft);
   outline: none;
 }
 
+.note-edit-button:active {
+  transform: scale(0.94);
+}
+
+.note-edit-button.has-notes {
+  border-color: var(--amber);
+  background: var(--note-strong-soft);
+  color: var(--amber-ink);
+}
+
+.note-edit-button.has-notes:hover,
+.note-edit-button.has-notes:focus-visible {
+  background: var(--amber);
+  color: var(--amber-contrast);
+}
+
 .note-edit-button svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
+  stroke-width: 2.1;
+}
+
+.note-edit-count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 2px solid var(--panel);
+  border-radius: 9px;
+  background: var(--amber);
+  color: var(--amber-contrast);
+  font: 700 10px/1 var(--font-sans);
+  pointer-events: none;
+}
+
+.hover-panel-actions .note-edit-count {
+  top: -5px;
+  right: -5px;
+  border-color: var(--hoverbar-bg);
 }
 
 .hover-meta {
@@ -1360,6 +1480,24 @@ main {
   border-color: var(--accent);
   color: var(--accent-ink);
   outline: none;
+}
+
+.icon-button.close-button:hover,
+.icon-button.close-button:focus-visible {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--red-contrast);
+  box-shadow: 0 0 0 3px var(--red-soft);
+}
+
+.icon-button.close-button {
+  border-color: var(--red-border);
+  background: var(--red-soft);
+  color: var(--red-ink);
+}
+
+.icon-button.close-button:active {
+  transform: scale(0.94);
 }
 
 .icon-button.danger:hover,
