@@ -43,6 +43,10 @@
           <button id="attachmentsButton" class="tool-button attachments-button" type="button" title="当前芯片附件" hidden>
             <i data-lucide="paperclip"></i><span>附件</span><span id="attachmentsButtonCount" class="action-count" hidden></span>
           </button>
+          <button id="radixToolButton" class="tool-button radix-tool-button" type="button" title="打开进制转换工具"
+            aria-controls="radixDialog" aria-expanded="false">
+            <i data-lucide="binary"></i><span>进制工具</span>
+          </button>
           <div id="themePicker" class="theme-picker">
             <button id="themeButton" class="icon-button theme-button" type="button" title="切换主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false">
               <i data-lucide="palette"></i>
@@ -63,6 +67,11 @@
                 <span>石墨深色</span>
                 <i class="theme-check" data-lucide="check"></i>
               </button>
+              <button type="button" role="menuitemradio" data-theme-option="rusty" aria-checked="false">
+                <span class="theme-preview rusty" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span>Rusty 锈钢</span>
+                <i class="theme-check" data-lucide="check"></i>
+              </button>
               <button type="button" role="menuitemradio" data-theme-option="contrast" aria-checked="false">
                 <span class="theme-preview contrast" aria-hidden="true"><i></i><i></i><i></i></span>
                 <span>高对比</span>
@@ -73,8 +82,14 @@
           <input id="yamlFileInput" type="file" accept=".yaml,.yml" multiple hidden>
           <input id="yamlFolderInput" type="file" accept=".yaml,.yml" multiple webkitdirectory hidden>
           <div class="segmented" role="tablist" aria-label="视图">
-            <button id="matrixViewButton" class="active" type="button" data-view="matrix">矩阵</button>
-            <button id="tableViewButton" type="button" data-view="table">传统</button>
+            <button id="matrixViewButton" class="active" type="button" role="tab" data-view="matrix"
+              aria-controls="matrixView" aria-selected="true" aria-label="矩阵视图" title="矩阵视图">
+              <i data-lucide="layout-grid"></i>
+            </button>
+            <button id="tableViewButton" type="button" role="tab" data-view="table"
+              aria-controls="tableView" aria-selected="false" aria-label="传统视图" title="传统视图">
+              <i data-lucide="table-properties"></i>
+            </button>
           </div>
         </div>
       </header>
@@ -192,6 +207,138 @@
           <div id="attachmentsStatus" class="attachments-status" aria-live="polite"></div>
         </footer>
       </dialog>
+
+      <aside id="radixDialog" class="radix-dialog" role="dialog" aria-modal="false" aria-labelledby="radixDialogTitle" tabindex="-1" hidden>
+        <header id="radixDialogDragHandle" class="radix-dialog-head">
+          <div>
+            <h2 id="radixDialogTitle">进制转换</h2>
+            <p>HEX、DEC、BIN 实时同步 · 位模式转换</p>
+          </div>
+          <button id="radixDialogCloseButton" class="icon-button close-button" type="button" title="关闭进制工具" aria-label="关闭进制工具">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="radix-dialog-body">
+          <div class="radix-width-toolbar">
+            <span class="radix-toolbar-label">位宽</span>
+            <div id="radixWidthControl" class="radix-width-control" role="tablist" aria-label="转换位宽">
+              <button type="button" role="tab" data-radix-width="8" aria-selected="false">8 bit</button>
+              <button type="button" role="tab" data-radix-width="16" aria-selected="false">16 bit</button>
+              <button type="button" role="tab" data-radix-width="32" aria-selected="true">32 bit</button>
+              <button type="button" role="tab" data-radix-width="64" aria-selected="false">64 bit</button>
+            </div>
+            <span id="radixValueStatus" class="radix-value-status" aria-live="polite"></span>
+          </div>
+
+          <div class="radix-signed-toolbar">
+            <span class="radix-toolbar-label">DEC</span>
+            <div id="radixSignedControl" class="radix-signed-control" role="tablist" aria-label="十进制数值解释">
+              <button class="active" type="button" role="tab" data-radix-signed="false" aria-selected="true" title="无符号整数">无符号</button>
+              <button type="button" role="tab" data-radix-signed="true" aria-selected="false" title="二进制补码有符号整数">有符号</button>
+            </div>
+          </div>
+
+          <div id="radixInputs" class="radix-inputs">
+            <label class="radix-field" data-radix-field="hex">
+              <span class="radix-field-label">HEX</span>
+              <span class="radix-prefix" aria-hidden="true">0x</span>
+              <input id="radixHexInput" data-radix-input="hex" type="text" spellcheck="false" inputmode="text" aria-label="十六进制值" autocomplete="off">
+              <button class="radix-copy-button" type="button" data-radix-copy="hex" title="复制十六进制值" aria-label="复制十六进制值">
+                <i data-lucide="copy"></i>
+              </button>
+            </label>
+            <label class="radix-field" data-radix-field="dec">
+              <span class="radix-field-label">DEC</span>
+              <input id="radixDecInput" data-radix-input="dec" type="text" spellcheck="false" inputmode="numeric" aria-label="十进制值" autocomplete="off">
+              <button class="radix-copy-button" type="button" data-radix-copy="dec" title="复制十进制值" aria-label="复制十进制值">
+                <i data-lucide="copy"></i>
+              </button>
+            </label>
+            <label class="radix-field" data-radix-field="bin">
+              <span class="radix-field-label">BIN</span>
+              <span class="radix-prefix" aria-hidden="true">0b</span>
+              <input id="radixBinInput" data-radix-input="bin" type="text" spellcheck="false" inputmode="numeric" aria-label="二进制值" autocomplete="off">
+              <button class="radix-copy-button" type="button" data-radix-copy="bin" title="复制二进制值" aria-label="复制二进制值">
+                <i data-lucide="copy"></i>
+              </button>
+            </label>
+          </div>
+
+          <section class="radix-inspector-section radix-composer-section" aria-labelledby="radixBitsTitle">
+            <div class="radix-section-head">
+              <h3 id="radixBitsTitle">位域组合</h3>
+              <div class="radix-composer-head-actions">
+                <span>拖动编号划分 · 点击值切换</span>
+                <button id="radixFieldsResetButton" class="icon-button radix-fields-reset" type="button"
+                  title="重置位域划分" aria-label="重置位域划分">
+                  <i data-lucide="rotate-ccw"></i>
+                </button>
+              </div>
+            </div>
+            <div id="radixComposerScroll" class="radix-composer-scroll radix-field-scroll">
+              <div id="radixComposer" class="radix-composer">
+                <div class="radix-composer-label" aria-hidden="true">字节</div>
+                <div id="radixBytes" class="radix-bytes"></div>
+                <div class="radix-composer-label" aria-hidden="true">位</div>
+                <div id="radixBits" class="radix-bits"></div>
+                <div class="radix-field-labels" aria-hidden="true">
+                  <span>范围</span>
+                  <span>HEX</span>
+                  <span>DEC</span>
+                  <span>名称</span>
+                </div>
+                <div id="radixFieldList" class="radix-field-list" aria-label="位域字段"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="radix-inspector-section" aria-labelledby="radixOperationsTitle">
+            <div class="radix-section-head">
+              <h3 id="radixOperationsTitle">常用操作</h3>
+              <span>结果按当前位宽截取</span>
+            </div>
+            <div id="radixOperations" class="radix-operations">
+              <div class="radix-basic-operations" role="group" aria-label="基础位操作">
+                <button class="radix-operation" type="button" data-radix-operation="zero" title="将值设为全 0">全 0</button>
+                <button class="radix-operation" type="button" data-radix-operation="ones" title="将值设为全 1">全 1</button>
+                <button class="radix-operation" type="button" data-radix-operation="invert" title="按当前位宽取反">取反</button>
+                <button class="radix-operation" type="button" data-radix-operation="increment" title="加 1">+1</button>
+                <button class="radix-operation" type="button" data-radix-operation="decrement" title="减 1">-1</button>
+              </div>
+              <div class="radix-shift-operation">
+                <button class="radix-shift-command" type="button" data-radix-operation="shift-left" title="按左移位数左移">左移</button>
+                <div class="radix-shift-control" role="group" aria-label="左移位数">
+                  <input id="radixShiftLeftInput" type="number" min="1" max="32" step="1" value="1" inputmode="numeric" aria-label="左移位数">
+                  <div class="radix-shift-stepper">
+                    <button class="radix-shift-step" type="button" data-radix-shift-direction="left" data-radix-shift-delta="1" title="左移位数加一" aria-label="左移位数加一">
+                      <i data-lucide="chevron-up"></i>
+                    </button>
+                    <button class="radix-shift-step" type="button" data-radix-shift-direction="left" data-radix-shift-delta="-1" title="左移位数减一" aria-label="左移位数减一">
+                      <i data-lucide="chevron-down"></i>
+                    </button>
+                  </div>
+                  <span>位</span>
+                </div>
+              </div>
+              <div class="radix-shift-operation">
+                <button class="radix-shift-command" type="button" data-radix-operation="shift-right" title="按右移位数右移">右移</button>
+                <div class="radix-shift-control" role="group" aria-label="右移位数">
+                  <input id="radixShiftRightInput" type="number" min="1" max="32" step="1" value="1" inputmode="numeric" aria-label="右移位数">
+                  <div class="radix-shift-stepper">
+                    <button class="radix-shift-step" type="button" data-radix-shift-direction="right" data-radix-shift-delta="1" title="右移位数加一" aria-label="右移位数加一">
+                      <i data-lucide="chevron-up"></i>
+                    </button>
+                    <button class="radix-shift-step" type="button" data-radix-shift-direction="right" data-radix-shift-delta="-1" title="右移位数减一" aria-label="右移位数减一">
+                      <i data-lucide="chevron-down"></i>
+                    </button>
+                  </div>
+                  <span>位</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
 
       <dialog id="noteDialog" class="note-dialog" aria-labelledby="noteDialogTitle">
         <header class="note-dialog-head">

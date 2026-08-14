@@ -28,6 +28,190 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
 
   await page.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  assert.equal(await page.locator("#matrixViewButton").innerText(), "");
+  assert.equal(await page.locator("#tableViewButton").innerText(), "");
+  assert.equal(await page.locator("#matrixViewButton svg").count(), 1);
+  assert.equal(await page.locator("#tableViewButton svg").count(), 1);
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "true");
+  await page.locator("#tableViewButton").click();
+  assert.equal(await page.locator("#tableViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "false");
+  await page.locator("#matrixViewButton").click();
+  await page.locator("#radixToolButton").click();
+  await page.waitForSelector("#radixDialog:not([hidden])");
+  assert.equal(await page.locator("#radixToolButton").getAttribute("aria-expanded"), "true");
+  await page.locator("#tableViewButton").click();
+  assert.equal(await page.locator("#tableViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#radixDialog").isVisible(), true);
+  await page.locator("#matrixViewButton").click();
+  assert.equal(await page.locator("#radixWidthControl [aria-selected='true']").getAttribute("data-radix-width"), "32");
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "00000000");
+  assert.equal(await page.locator("#radixBinInput").inputValue(), "0".repeat(32));
+  assert.equal(await page.locator("#radixBits .radix-bit").count(), 32);
+  assert.equal(await page.locator("#radixBits .radix-bit").first().getAttribute("data-radix-bit"), "31");
+  assert.equal(await page.locator("#radixBits .radix-bit").nth(8).getAttribute("data-radix-bit"), "23");
+  assert.equal(await page.locator("#radixBits").evaluate((bits) => getComputedStyle(bits).gridTemplateColumns.split(" ").length), 32);
+  assert.equal(await page.locator("#radixBytes .radix-byte").count(), 4);
+  await page.locator("#radixHexInput").fill("DEADBEEF");
+  assert.equal(await page.locator("#radixDecInput").inputValue(), "3735928559");
+  assert.equal(await page.locator("#radixBinInput").inputValue(), "11011110101011011011111011101111");
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["31:0"]);
+  const fieldStartLabel = page.locator("[data-radix-bit-index='31']");
+  const fieldEndLabel = page.locator("[data-radix-bit-index='24']");
+  await fieldStartLabel.scrollIntoViewIfNeeded();
+  const fieldStart = await fieldStartLabel.boundingBox();
+  const fieldEnd = await fieldEndLabel.boundingBox();
+  assert.ok(fieldStart && fieldEnd, "bit labels should be available for field selection");
+  await page.mouse.move(fieldStart.x + fieldStart.width / 2, fieldStart.y + fieldStart.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(fieldEnd.x + fieldEnd.width / 2, fieldEnd.y + fieldEnd.height / 2, { steps: 4 });
+  await page.mouse.up();
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "DEADBEEF");
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["31:24", "23:0"]);
+  assert.equal(await page.locator("#radixBits .radix-bit.is-field-active").count(), 0);
+  assert.equal(await page.locator("#radixFieldList .radix-field-cell.active").count(), 0);
+  assert.equal(await page.locator("#radixFieldList .radix-field-track").count(), 4);
+  assert.equal(
+    await page.locator(".radix-field-labels").evaluate((labels) => getComputedStyle(labels).gridTemplateRows.split(" ").length),
+    4,
+  );
+  assert.deepEqual(
+    await page.locator("#radixFieldList [data-radix-field-track='range'] .radix-field-range").evaluateAll((fields) => fields.map((field) => {
+      const style = getComputedStyle(field);
+      return [style.gridColumnStart, style.gridColumnEnd];
+    })),
+    [["1", "span 8"], ["9", "span 24"]],
+  );
+  assert.equal(
+    await page.evaluate(() => {
+      const byte = document.querySelector("#radixBytes .radix-byte").getBoundingClientRect();
+      const highBit = document.querySelector("[data-radix-bit='31']").getBoundingClientRect();
+      const lowBit = document.querySelector("[data-radix-bit='24']").getBoundingClientRect();
+      const field = document.querySelector(".radix-field-range[data-radix-field-key='31:24']").getBoundingClientRect();
+      return Math.max(
+        Math.abs(byte.left - highBit.left),
+        Math.abs(byte.right - lowBit.right),
+        Math.abs(field.left - highBit.left),
+        Math.abs(field.right - lowBit.right),
+      ) <= 1;
+    }),
+    true,
+    "byte, bit, and field boundaries should share one horizontal axis",
+  );
+  await page.locator(".radix-field-range[data-radix-field-key='31:24']").click();
+  assert.equal(await page.locator("#radixBits .radix-bit.is-field-active").count(), 8);
+  assert.equal(await page.locator("#radixFieldList .radix-field-cell.active").count(), 4);
+  await page.locator(".radix-field-range[data-radix-field-key='23:0']").click();
+  assert.equal(await page.locator("#radixBits .radix-bit.is-field-active").count(), 24);
+  assert.equal(await page.locator("#radixFieldList .radix-field-cell.active").count(), 4);
+  await page.locator("#radixBitsTitle").click();
+  assert.equal(await page.locator("#radixBits .radix-bit.is-field-active").count(), 0);
+  assert.equal(await page.locator("#radixFieldList .radix-field-cell.active").count(), 0);
+  await page.locator("[data-radix-bit-value='0']").click();
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "DEADBEEE");
+  await page.locator("[data-radix-operation='increment']").click();
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "DEADBEEF");
+  await page.locator("[data-radix-field-key='31:24'] [data-radix-field-input='hex']").fill("A5");
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "A5ADBEEF");
+  await page.locator("[data-radix-field-key='31:24'] [data-radix-field-input='dec']").fill("18");
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "12ADBEEF");
+  await page.locator("[data-radix-field-key='31:24'] [data-radix-field-input='dec']").fill("256");
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "12ADBEEF");
+  assert.match(await page.locator("#radixValueStatus").innerText(), /31:24: 超出当前 8 bit 字段范围/);
+  assert.equal(
+    await page.locator("[data-radix-field-key='31:24'] [data-radix-field-input='dec']").evaluate((input) => input.classList.contains("invalid")),
+    true,
+  );
+  await page.locator("[data-radix-field-key='31:24'] [data-radix-field-name]").fill("opcode");
+  await page.locator("[data-radix-bit-index='23']").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["31:24", "23", "22:0"]);
+  assert.equal(await page.locator(".radix-field-range[data-radix-field-key='23:23']").innerText(), "23");
+  assert.equal(
+    await page.locator(".radix-field-range[data-radix-field-key='23:23']").evaluate((field) => field.scrollWidth <= field.clientWidth),
+    true,
+    "single-bit field label should stay within one bit column",
+  );
+  await page.locator("#radixFieldsResetButton").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["31:0"]);
+  assert.equal(await page.locator("#radixFieldList [data-radix-field-name]").inputValue(), "");
+  await page.locator("[data-radix-width='16']").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["15:0"]);
+  await page.locator("#radixHexInput").fill("FF80");
+  assert.equal(await page.locator("#radixDecInput").inputValue(), "65408");
+  await page.locator("[data-radix-signed='true']").click();
+  assert.equal(await page.locator("[data-radix-signed='true']").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#radixDecInput").inputValue(), "-128");
+  await page.locator("#radixDecInput").fill("-32768");
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "8000");
+  await page.locator("#radixDecInput").fill("-32769");
+  assert.match(await page.locator("#radixValueStatus").innerText(), /超出当前 16 bit 有符号范围/);
+  await page.locator("[data-radix-signed='false']").click();
+  assert.equal(await page.locator("#radixDecInput").inputValue(), "32768");
+  assert.equal(await page.locator("#radixShiftLeftInput").inputValue(), "1");
+  assert.equal(await page.locator("#radixShiftRightInput").inputValue(), "1");
+  await page.locator("#radixShiftLeftInput").fill("3");
+  await page.locator("[data-radix-operation='shift-left']").click();
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "0000");
+  assert.equal(await page.locator("#radixShiftRightInput").inputValue(), "1");
+  await page.locator("#radixHexInput").fill("0080");
+  await page.locator("#radixShiftRightInput").fill("3");
+  await page.locator("#radixShiftRightInput").press("ArrowUp");
+  assert.equal(await page.locator("#radixShiftRightInput").inputValue(), "4");
+  await page.locator("[data-radix-shift-direction='right'][data-radix-shift-delta='-1']").click();
+  assert.equal(await page.locator("#radixShiftRightInput").inputValue(), "3");
+  await page.locator("[data-radix-shift-direction='right'][data-radix-shift-delta='1']").click();
+  assert.equal(await page.locator("#radixShiftRightInput").inputValue(), "4");
+  await page.locator("[data-radix-operation='shift-right']").click();
+  assert.equal(await page.locator("#radixHexInput").inputValue(), "0008");
+  await page.locator("[data-radix-width='64']").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["63:0"]);
+  await page.locator("[data-radix-bit-index='63']").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["63", "62:0"]);
+  assert.equal(
+    await page.locator(".radix-field-range[data-radix-field-key='63:63']").evaluate((field) => field.scrollWidth <= field.clientWidth),
+    true,
+    "64-bit single-bit field label should stay within one bit column",
+  );
+  assert.equal(
+    await page.locator("[data-radix-field-key='63:63'] [data-radix-field-input='hex']").evaluate((input) => getComputedStyle(input).paddingLeft),
+    "0px",
+  );
+  await page.locator("#radixFieldsResetButton").click();
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["63:0"]);
+  assert.equal(
+    await page.locator(".radix-field-scroll").evaluate((scroll) => scroll.scrollWidth <= scroll.clientWidth + 1),
+    true,
+    "wide 64-bit field workbench should keep the full register in view",
+  );
+  assert.equal(await page.locator("#radixBits .radix-bit").count(), 64);
+  assert.equal(await page.locator("#radixBytes .radix-byte").count(), 8);
+  const toolbarBox = await page.locator(".toolbar").boundingBox();
+  const radixPanel64 = await page.locator("#radixDialog").boundingBox();
+  assert.ok(radixPanel64.y >= toolbarBox.y + toolbarBox.height, "64-bit panel should remain below the toolbar");
+  assert.ok(radixPanel64.width >= 1000, "64-bit panel should expand its composition workspace");
+  assert.equal(await page.locator(".radix-dialog-body").evaluate((body) => getComputedStyle(body).overflowY), "auto");
+  await page.locator("#radixHexInput").fill("FEDCBA9876543210");
+  assert.equal(await page.locator("#radixDecInput").inputValue(), "18364758544493064720");
+  await page.locator("#radixHexInput").fill("10000000000000000");
+  assert.match(await page.locator("#radixValueStatus").innerText(), /超出当前 64 bit/);
+  assert.equal(await page.locator(".radix-field[data-radix-field='hex']").evaluate((field) => field.classList.contains("invalid")), true);
+  const radixBeforeDrag = await page.locator("#radixDialog").boundingBox();
+  const radixHeader = await page.locator("#radixDialogDragHandle").boundingBox();
+  await page.mouse.move(radixHeader.x + 80, radixHeader.y + 18);
+  await page.mouse.down();
+  await page.mouse.move(radixHeader.x - 120, radixHeader.y + 54);
+  await page.mouse.up();
+  const radixAfterDrag = await page.locator("#radixDialog").boundingBox();
+  assert.ok(radixAfterDrag.x < radixBeforeDrag.x - 80, "radix tool should follow a header drag");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#radixDialog", { state: "hidden" });
+  assert.equal(await page.locator("#radixToolButton").getAttribute("aria-expanded"), "false");
+  await page.locator("#radixToolButton").click();
+  await page.waitForSelector("#radixDialog:not([hidden])");
+  assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["63:0"]);
+  assert.equal(await page.locator("#radixFieldList [data-radix-field-name]").inputValue(), "");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#radixDialog", { state: "hidden" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   await page.locator("#themeButton").click();
   await page.waitForFunction(() => document.activeElement?.dataset.themeOption === "light");
@@ -39,6 +223,13 @@ try {
   assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(20, 22, 24)");
   await page.reload({ waitUntil: "load" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+  await page.locator("#themeButton").click();
+  await page.locator('[data-theme-option="rusty"]').click();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
+  assert.equal(await page.evaluate(() => localStorage.getItem("register-reference.theme")), "rusty");
+  assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(28, 29, 31)");
+  await page.reload({ waitUntil: "load" });
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
   await page.locator("#themeButton").click();
   await page.locator('[data-theme-option="contrast"]').click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "contrast");
@@ -224,6 +415,48 @@ pages:
   await page.locator("#importResultConfirmButton").click();
   assert.deepEqual(errors, []);
   console.log(`[${browserEngine}] main viewer checks passed`);
+
+  const mobilePage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const mobileErrors = [];
+  mobilePage.on("console", (message) => {
+    if (message.type() === "error") mobileErrors.push(message.text());
+  });
+  mobilePage.on("pageerror", (error) => mobileErrors.push(error.message));
+  await mobilePage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  await mobilePage.locator("#radixToolButton").click();
+  await mobilePage.waitForSelector("#radixDialog:not([hidden])");
+  const mobilePanelBeforeDrag = await mobilePage.locator("#radixDialog").boundingBox();
+  const mobileHeader = await mobilePage.locator("#radixDialogDragHandle").boundingBox();
+  await mobilePage.mouse.move(mobileHeader.x + 60, mobileHeader.y + 16);
+  await mobilePage.mouse.down();
+  await mobilePage.mouse.move(mobileHeader.x + 180, mobileHeader.y + 80);
+  await mobilePage.mouse.up();
+  const mobilePanelAfterDrag = await mobilePage.locator("#radixDialog").boundingBox();
+  assert.equal(Math.round(mobilePanelAfterDrag.x), Math.round(mobilePanelBeforeDrag.x));
+  assert.equal(Math.round(mobilePanelAfterDrag.y), Math.round(mobilePanelBeforeDrag.y));
+  await mobilePage.locator("[data-radix-width='64']").click();
+  await mobilePage.locator("#radixFieldList").scrollIntoViewIfNeeded();
+  assert.equal(
+    await mobilePage.locator(".radix-field-scroll").evaluate((scroll) => scroll.scrollWidth > scroll.clientWidth),
+    true,
+    "mobile field workbench should scroll within its own viewport",
+  );
+  assert.equal(
+    await mobilePage.evaluate(() => {
+      const panel = document.querySelector("#radixDialog").getBoundingClientRect();
+      return (
+        document.documentElement.scrollWidth <= window.innerWidth &&
+        panel.left >= 0 &&
+        panel.top >= 0 &&
+        panel.right <= window.innerWidth &&
+        panel.bottom <= window.innerHeight
+      );
+    }),
+    true,
+  );
+  assert.deepEqual(mobileErrors, []);
+  await mobilePage.close();
+  console.log(`[${browserEngine}] mobile floating tool checks passed`);
 
   const notesPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const noteErrors = [];

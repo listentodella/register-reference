@@ -5,6 +5,7 @@
     system: "跟随系统",
     light: "清晰亮色",
     dark: "石墨深色",
+    rusty: "Rusty 锈钢",
     contrast: "高对比",
   };
   const systemThemeMedia = window.matchMedia?.("(prefers-color-scheme: dark)") || null;
@@ -28,6 +29,18 @@
     noteKind: "note",
     attachmentsStatus: "",
     attachmentsStatusError: false,
+    radixValue: 0n,
+    radixBitWidth: 32,
+    radixSigned: false,
+    radixShiftCounts: { left: 1, right: 1 },
+    radixInputErrors: new Set(),
+    radixFields: [],
+    radixFieldInputErrors: new Set(),
+    radixActiveFieldKey: "",
+    radixFieldSelection: null,
+    radixStatus: "",
+    radixPosition: null,
+    radixDrag: null,
     themePreference: "light",
     themeMenuOpen: false,
   };
@@ -75,6 +88,25 @@
     addAttachmentsButton: document.getElementById("addAttachmentsButton"),
     attachmentsList: document.getElementById("attachmentsList"),
     attachmentsStatus: document.getElementById("attachmentsStatus"),
+    radixToolButton: document.getElementById("radixToolButton"),
+    radixDialog: document.getElementById("radixDialog"),
+    radixDialogDragHandle: document.getElementById("radixDialogDragHandle"),
+    radixDialogCloseButton: document.getElementById("radixDialogCloseButton"),
+    radixWidthControl: document.getElementById("radixWidthControl"),
+    radixSignedControl: document.getElementById("radixSignedControl"),
+    radixValueStatus: document.getElementById("radixValueStatus"),
+    radixInputs: document.getElementById("radixInputs"),
+    radixBytes: document.getElementById("radixBytes"),
+    radixBits: document.getElementById("radixBits"),
+    radixComposer: document.getElementById("radixComposer"),
+    radixComposerScroll: document.getElementById("radixComposerScroll"),
+    radixFieldList: document.getElementById("radixFieldList"),
+    radixFieldsResetButton: document.getElementById("radixFieldsResetButton"),
+    radixShiftInputs: {
+      left: document.getElementById("radixShiftLeftInput"),
+      right: document.getElementById("radixShiftRightInput"),
+    },
+    radixOperations: document.getElementById("radixOperations"),
     noteDialog: document.getElementById("noteDialog"),
     noteDialogTitle: document.getElementById("noteDialogTitle"),
     noteDialogRegister: document.getElementById("noteDialogRegister"),
@@ -524,6 +556,579 @@
   function formatBigIntHex(value, bitWidth) {
     const digits = Math.max(1, Math.ceil(Number(bitWidth || 1) / 4));
     return `0x${value.toString(16).toUpperCase().padStart(digits, "0")}`;
+  }
+
+  function getRadixMask() {
+    return (1n << BigInt(state.radixBitWidth)) - 1n;
+  }
+
+  function getRadixSignedValue() {
+    const value = state.radixValue & getRadixMask();
+    const signBit = 1n << BigInt(state.radixBitWidth - 1);
+    return value & signBit ? value - (getRadixMask() + 1n) : value;
+  }
+
+  function getRadixFieldKey(field) {
+    return `${field.high}:${field.low}`;
+  }
+
+  function formatRadixFieldRange(field) {
+    return field.high === field.low ? String(field.high) : getRadixFieldKey(field);
+  }
+
+  function getRadixFieldWidth(field) {
+    return field.high - field.low + 1;
+  }
+
+  function getRadixFieldMask(field) {
+    return ((1n << BigInt(getRadixFieldWidth(field))) - 1n) << BigInt(field.low);
+  }
+
+  function getRadixFieldValue(field) {
+    return (state.radixValue & getRadixFieldMask(field)) >> BigInt(field.low);
+  }
+
+  function getRadixFieldAtBit(bit) {
+    return state.radixFields.find((field) => bit <= field.high && bit >= field.low) || null;
+  }
+
+  function resetRadixFields() {
+    state.radixFields = [{ high: state.radixBitWidth - 1, low: 0, name: "" }];
+    state.radixFieldInputErrors.clear();
+    state.radixActiveFieldKey = "";
+    state.radixFieldSelection = null;
+  }
+
+  function formatRadixFieldValue(field, radix) {
+    const value = getRadixFieldValue(field);
+    if (radix === 16) return value.toString(16).toUpperCase().padStart(Math.ceil(getRadixFieldWidth(field) / 4), "0");
+    return value.toString(10);
+  }
+
+  function parseRadixFieldValue(text, radix, field) {
+    let compact = String(text ?? "").trim().replace(/_/g, "");
+    if (!compact) return { ok: true, value: 0n, message: "" };
+    if (radix === 16 && /^0x/i.test(compact)) compact = compact.slice(2);
+    if (!compact) return { ok: true, value: 0n, message: "" };
+    const pattern = radix === 16 ? /^[0-9a-f]+$/i : /^\d+$/;
+    if (!pattern.test(compact)) return { ok: false, value: 0n, message: "输入值格式无效" };
+    try {
+      const value = BigInt(radix === 16 ? `0x${compact}` : compact);
+      const max = (1n << BigInt(getRadixFieldWidth(field))) - 1n;
+      if (value > max) {
+        return { ok: false, value, message: `超出当前 ${getRadixFieldWidth(field)} bit 字段范围` };
+      }
+      return { ok: true, value, message: "" };
+    } catch (error) {
+      return { ok: false, value: 0n, message: error.message || "输入值格式无效" };
+    }
+  }
+
+  function getRadixShiftCount(direction) {
+    const parsed = Number.parseInt(els.radixShiftInputs[direction].value, 10);
+    if (!Number.isInteger(parsed)) return state.radixShiftCounts[direction];
+    return Math.min(state.radixBitWidth, Math.max(1, parsed));
+  }
+
+  function syncRadixShiftControl(direction) {
+    const input = els.radixShiftInputs[direction];
+    state.radixShiftCounts[direction] = Math.min(state.radixBitWidth, Math.max(1, state.radixShiftCounts[direction]));
+    input.min = "1";
+    input.max = String(state.radixBitWidth);
+    input.value = String(state.radixShiftCounts[direction]);
+  }
+
+  function syncRadixShiftControls() {
+    ["left", "right"].forEach(syncRadixShiftControl);
+  }
+
+  function formatRadixValue(radix) {
+    const value = state.radixValue & getRadixMask();
+    if (radix === 16) return value.toString(16).toUpperCase().padStart(state.radixBitWidth / 4, "0");
+    if (radix === 2) return value.toString(2).padStart(state.radixBitWidth, "0");
+    return (state.radixSigned ? getRadixSignedValue() : value).toString(10);
+  }
+
+  function parseRadixValue(text, radix) {
+    let compact = String(text ?? "").trim().replace(/_/g, "");
+    if (!compact) return { ok: true, value: 0n, message: "" };
+    if (radix === 16 && /^0x/i.test(compact)) compact = compact.slice(2);
+    if (radix === 2 && /^0b/i.test(compact)) compact = compact.slice(2);
+    if (radix === 2 && /b$/i.test(compact)) compact = compact.slice(0, -1);
+    if (!compact) return { ok: true, value: 0n, message: "" };
+
+    const pattern = radix === 16 ? /^[0-9a-f]+$/i : radix === 2 ? /^[01]+$/ : state.radixSigned ? /^-?\d+$/ : /^\d+$/;
+    if (!pattern.test(compact)) return { ok: false, value: 0n, message: "输入值格式无效" };
+    try {
+      const value = BigInt(radix === 16 ? `0x${compact}` : radix === 2 ? `0b${compact}` : compact);
+      if (radix === 10 && state.radixSigned) {
+        const signedLimit = 1n << BigInt(state.radixBitWidth - 1);
+        if (value < -signedLimit || value >= signedLimit) {
+          return { ok: false, value, message: `超出当前 ${state.radixBitWidth} bit 有符号范围` };
+        }
+        return { ok: true, value: value < 0n ? value + getRadixMask() + 1n : value, message: "" };
+      }
+      if (value > getRadixMask()) {
+        return { ok: false, value, message: `超出当前 ${state.radixBitWidth} bit 位宽` };
+      }
+      return { ok: true, value, message: "" };
+    } catch (error) {
+      return { ok: false, value: 0n, message: error.message || "输入值格式无效" };
+    }
+  }
+
+  function setRadixStatus(message = "") {
+    state.radixStatus = message;
+    els.radixValueStatus.textContent = message || `${state.radixSigned ? "二补码有符号" : "无符号"} · ${state.radixBitWidth} bit`;
+    els.radixValueStatus.classList.toggle("error", Boolean(message));
+  }
+
+  function syncRadixFields(preserveKind = "") {
+    const values = { hex: formatRadixValue(16), dec: formatRadixValue(10), bin: formatRadixValue(2) };
+    ["hex", "dec", "bin"].forEach((kind) => {
+      const input = els.radixInputs.querySelector(`[data-radix-input="${kind}"]`);
+      if (!input) return;
+      if (kind !== preserveKind) input.value = values[kind];
+      input.closest(".radix-field")?.classList.toggle("invalid", state.radixInputErrors.has(kind));
+    });
+    if (!preserveKind) state.radixInputErrors.clear();
+  }
+
+  function renderRadixBytes() {
+    const bytes = [];
+    const hex = formatRadixValue(16);
+    for (let index = 0; index < state.radixBitWidth / 8; index += 1) {
+      const start = index * 2;
+      bytes.push(`<span class="radix-byte" style="--radix-byte-start: ${index * 8 + 1}; --radix-byte-span: 8">${hex.slice(start, start + 2)}</span>`);
+    }
+    els.radixBytes.innerHTML = bytes.join("");
+  }
+
+  function renderRadixBits() {
+    const value = state.radixValue & getRadixMask();
+    const bits = [];
+    const selection = state.radixFieldSelection;
+    const selectionHigh = selection ? Math.max(selection.start, selection.end) : -1;
+    const selectionLow = selection ? Math.min(selection.start, selection.end) : -1;
+    for (let bit = state.radixBitWidth - 1; bit >= 0; bit -= 1) {
+      const set = ((value >> BigInt(bit)) & 1n) === 1n;
+      const field = getRadixFieldAtBit(bit);
+      const active = field && getRadixFieldKey(field) === state.radixActiveFieldKey;
+      const preview = selection && bit <= selectionHigh && bit >= selectionLow;
+      bits.push(`
+        <div class="radix-bit ${set ? "set" : ""} ${active ? "is-field-active" : ""} ${preview ? "is-field-preview" : ""}"
+          data-radix-bit="${bit}">
+          <span class="radix-bit-index" data-radix-bit-index="${bit}" title="拖动定义位域范围">${bit}</span>
+          <button class="radix-bit-value" type="button" data-radix-bit-value="${bit}"
+            aria-label="bit ${bit}: ${set ? 1 : 0}" title="bit ${bit}：${set ? 1 : 0}">${set ? 1 : 0}</button>
+        </div>
+      `);
+    }
+    els.radixBits.innerHTML = bits.join("");
+  }
+
+  function renderRadixFields() {
+    const bitColumnWidth = state.radixBitWidth === 64 ? 16 : 20;
+    const totalWidth = state.radixBitWidth * bitColumnWidth;
+    const getFieldStyle = (field) => {
+      const start = state.radixBitWidth - field.high;
+      return `--radix-field-start: ${start}; --radix-field-span: ${getRadixFieldWidth(field)};`;
+    };
+    const renderTrack = (kind) => state.radixFields.map((field) => {
+      const key = getRadixFieldKey(field);
+      const range = formatRadixFieldRange(field);
+      const active = key === state.radixActiveFieldKey;
+      const narrow = getRadixFieldWidth(field) <= 2;
+      const classes = `radix-field-cell ${narrow ? "is-narrow" : ""} ${active ? "active" : ""}`;
+      const attributes = `data-radix-field-key="${key}" style="${getFieldStyle(field)}"`;
+      if (kind === "range") {
+        return `<button class="${classes} radix-field-range" type="button" ${attributes}
+          title="选择位域 ${range}" aria-label="选择位域 ${range}">${range}</button>`;
+      }
+      if (kind === "name") {
+        return `<label class="${classes}" ${attributes}>
+          <input class="radix-field-name-input" type="text" maxlength="80" value="${escapeHtml(field.name)}"
+            data-radix-field-name data-radix-field-key="${key}" aria-label="位域 ${key} 名称">
+        </label>`;
+      }
+      const radix = kind === "hex" ? 16 : 10;
+      return `<label class="${classes}" ${attributes}>
+        <input type="text" spellcheck="false" inputmode="${kind === "hex" ? "text" : "numeric"}" autocomplete="off"
+          value="${formatRadixFieldValue(field, radix)}" data-radix-field-input="${kind}" data-radix-field-key="${key}"
+          aria-label="位域 ${key} ${kind === "hex" ? "十六进制" : "十进制"}值">
+      </label>`;
+    }).join("");
+    [els.radixComposer, els.radixBytes, els.radixBits, els.radixFieldList].forEach((element) => {
+      element.style.setProperty("--radix-field-width", `${totalWidth}px`);
+      element.style.setProperty("--radix-field-columns", String(state.radixBitWidth));
+    });
+    els.radixFieldList.innerHTML = ["range", "hex", "dec", "name"].map((kind) => `
+      <div class="radix-field-track" data-radix-field-track="${kind}">${renderTrack(kind)}</div>
+    `).join("");
+    syncRadixFieldValues();
+  }
+
+  function scrollRadixFieldIntoView(fieldKey = state.radixActiveFieldKey) {
+    const scroll = els.radixComposerScroll;
+    if (!scroll) return;
+    if (!fieldKey) {
+      scroll.scrollLeft = 0;
+      return;
+    }
+    const field = Array.from(els.radixFieldList.querySelectorAll(".radix-field-range")).find(
+      (cell) => cell.dataset.radixFieldKey === fieldKey,
+    );
+    if (!field) return;
+    const fieldRect = field.getBoundingClientRect();
+    const scrollRect = scroll.getBoundingClientRect();
+    const nextLeft = scroll.scrollLeft + fieldRect.left - scrollRect.left - (scroll.clientWidth - fieldRect.width) / 2;
+    scroll.scrollLeft = Math.max(0, Math.min(nextLeft, scroll.scrollWidth - scroll.clientWidth));
+  }
+
+  function setRadixActiveField(key = "") {
+    if (key === state.radixActiveFieldKey) return;
+    state.radixActiveFieldKey = key;
+    renderRadixBits();
+    syncRadixFieldValues();
+  }
+
+  function syncRadixFieldValues(preserveKey = "") {
+    els.radixFieldList.querySelectorAll(".radix-field-cell[data-radix-field-key]").forEach((cell) => {
+      const key = cell.dataset.radixFieldKey;
+      cell.classList.toggle("active", key === state.radixActiveFieldKey);
+    });
+    els.radixFieldList.querySelectorAll("[data-radix-field-input]").forEach((input) => {
+      const key = input.dataset.radixFieldKey;
+      const field = state.radixFields.find((item) => getRadixFieldKey(item) === key);
+      if (!field) return;
+      const inputKey = `${key}:${input.dataset.radixFieldInput}`;
+      if (inputKey !== preserveKey) input.value = formatRadixFieldValue(field, input.dataset.radixFieldInput === "hex" ? 16 : 10);
+      input.classList.toggle("invalid", state.radixFieldInputErrors.has(inputKey));
+    });
+  }
+
+  function applyRadixFieldSelection(start, end) {
+    const high = Math.max(start, end);
+    const low = Math.min(start, end);
+    const existing = state.radixFields.find((field) => field.high === high && field.low === low);
+    state.radixFieldSelection = null;
+    state.radixFieldInputErrors.clear();
+    if (existing) {
+      const selectedKey = getRadixFieldKey(existing);
+      state.radixActiveFieldKey = "";
+      renderRadixBits();
+      renderRadixFields();
+      scrollRadixFieldIntoView(selectedKey);
+      return;
+    }
+
+    const next = [];
+    let inserted = false;
+    state.radixFields.forEach((field) => {
+      if (field.low > high || field.high < low) {
+        next.push(field);
+        return;
+      }
+      if (field.high > high) next.push({ high: field.high, low: high + 1, name: "" });
+      if (!inserted) {
+        next.push({ high, low, name: "" });
+        inserted = true;
+      }
+      if (field.low < low) next.push({ high: low - 1, low: field.low, name: "" });
+    });
+    state.radixFields = next.sort((left, right) => right.high - left.high);
+    const selectedKey = `${high}:${low}`;
+    state.radixActiveFieldKey = "";
+    renderRadixBits();
+    renderRadixFields();
+    scrollRadixFieldIntoView(selectedKey);
+  }
+
+  function getRadixBitAtPointer(event) {
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-radix-bit]");
+    const bit = Number(target?.dataset.radixBit);
+    return Number.isInteger(bit) ? bit : null;
+  }
+
+  function startRadixFieldSelection(event) {
+    const label = event.target.closest("[data-radix-bit-index]");
+    if (!label || event.button !== 0) return;
+    const bit = Number(label.dataset.radixBitIndex);
+    state.radixFieldSelection = { pointerId: event.pointerId, start: bit, end: bit };
+    els.radixBits.setPointerCapture?.(event.pointerId);
+    renderRadixBits();
+    event.preventDefault();
+  }
+
+  function moveRadixFieldSelection(event) {
+    if (!state.radixFieldSelection || state.radixFieldSelection.pointerId !== event.pointerId) return;
+    const bit = getRadixBitAtPointer(event);
+    if (bit === null || bit === state.radixFieldSelection.end) return;
+    state.radixFieldSelection.end = bit;
+    renderRadixBits();
+  }
+
+  function endRadixFieldSelection(event) {
+    if (!state.radixFieldSelection || state.radixFieldSelection.pointerId !== event.pointerId) return;
+    const { start, end } = state.radixFieldSelection;
+    if (els.radixBits.hasPointerCapture?.(event.pointerId)) els.radixBits.releasePointerCapture(event.pointerId);
+    applyRadixFieldSelection(start, end);
+  }
+
+  function cancelRadixFieldSelection(event) {
+    if (!state.radixFieldSelection || state.radixFieldSelection.pointerId !== event.pointerId) return;
+    if (els.radixBits.hasPointerCapture?.(event.pointerId)) els.radixBits.releasePointerCapture(event.pointerId);
+    state.radixFieldSelection = null;
+    renderRadixBits();
+  }
+
+  function renderRadixDialog() {
+    els.radixDialog.classList.toggle("is-wide", state.radixBitWidth === 64);
+    els.radixWidthControl.querySelectorAll("[data-radix-width]").forEach((button) => {
+      const active = Number(button.dataset.radixWidth) === state.radixBitWidth;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    els.radixSignedControl.querySelectorAll("[data-radix-signed]").forEach((button) => {
+      const active = (button.dataset.radixSigned === "true") === state.radixSigned;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    syncRadixFields();
+    renderRadixBytes();
+    renderRadixBits();
+    renderRadixFields();
+    syncRadixShiftControls();
+    setRadixStatus(state.radixStatus);
+    refreshIcons(els.radixDialog);
+  }
+
+  function updateRadixValue(value, preserveKind = "", preserveFieldKey = "") {
+    state.radixValue = value & getRadixMask();
+    state.radixInputErrors.clear();
+    syncRadixFields(preserveKind);
+    renderRadixBytes();
+    renderRadixBits();
+    syncRadixFieldValues(preserveFieldKey);
+    setRadixStatus();
+  }
+
+  function radixDialogMargin() {
+    return window.innerWidth <= 560 ? 10 : 16;
+  }
+
+  function clampRadixDialogPosition(left, top) {
+    const margin = radixDialogMargin();
+    const rect = els.radixDialog.getBoundingClientRect();
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    return {
+      left: Math.min(Math.max(margin, left), maxLeft),
+      top: Math.min(Math.max(margin, top), maxTop),
+    };
+  }
+
+  function positionRadixDialog(left, top) {
+    const position = clampRadixDialogPosition(left, top);
+    state.radixPosition = position;
+    els.radixDialog.style.left = `${Math.round(position.left)}px`;
+    els.radixDialog.style.top = `${Math.round(position.top)}px`;
+  }
+
+  function dockRadixDialog() {
+    const margin = radixDialogMargin();
+    const rect = els.radixDialog.getBoundingClientRect();
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    const top = window.innerWidth <= 560 ? maxTop : Math.min(86, maxTop);
+    positionRadixDialog(window.innerWidth - rect.width - margin, top);
+  }
+
+  function clampOpenRadixDialog() {
+    if (els.radixDialog.hidden) return;
+    if (window.innerWidth <= 560 || !state.radixPosition) {
+      dockRadixDialog();
+      return;
+    }
+    positionRadixDialog(state.radixPosition.left, state.radixPosition.top);
+  }
+
+  function canDragRadixDialog() {
+    return window.innerWidth > 560;
+  }
+
+  function startRadixDrag(event) {
+    if (event.button !== 0 || !canDragRadixDialog()) return;
+    if (event.target.closest("button, input, select, textarea, a")) return;
+    const rect = els.radixDialog.getBoundingClientRect();
+    state.radixDrag = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    };
+    els.radixDialog.classList.add("is-dragging");
+    els.radixDialogDragHandle.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveRadixDrag(event) {
+    if (!state.radixDrag || state.radixDrag.pointerId !== event.pointerId) return;
+    positionRadixDialog(event.clientX - state.radixDrag.offsetX, event.clientY - state.radixDrag.offsetY);
+  }
+
+  function endRadixDrag(event) {
+    if (!state.radixDrag || state.radixDrag.pointerId !== event.pointerId) return;
+    if (els.radixDialogDragHandle.hasPointerCapture?.(event.pointerId)) {
+      els.radixDialogDragHandle.releasePointerCapture(event.pointerId);
+    }
+    state.radixDrag = null;
+    els.radixDialog.classList.remove("is-dragging");
+  }
+
+  function openRadixDialog() {
+    if (!els.radixDialog.hidden) {
+      clampOpenRadixDialog();
+      els.radixDialog.focus({ preventScroll: true });
+      return;
+    }
+    closeNoteDialog();
+    closeAttachmentsDialog();
+    if (state.libraryOpen) closeLibrary();
+    state.radixInputErrors.clear();
+    state.radixStatus = "";
+    resetRadixFields();
+    renderRadixDialog();
+    els.radixDialog.hidden = false;
+    els.radixToolButton.setAttribute("aria-expanded", "true");
+    clampOpenRadixDialog();
+    refreshIcons(els.radixDialog);
+    window.setTimeout(() => {
+      scrollRadixFieldIntoView();
+      els.radixInputs.querySelector("[data-radix-input='hex']")?.focus();
+    }, 0);
+  }
+
+  function closeRadixDialog(restoreFocus = true) {
+    if (els.radixDialog.hidden) return;
+    const pointerId = state.radixDrag?.pointerId;
+    if (pointerId != null && els.radixDialogDragHandle.hasPointerCapture?.(pointerId)) {
+      els.radixDialogDragHandle.releasePointerCapture(pointerId);
+    }
+    state.radixDrag = null;
+    els.radixDialog.classList.remove("is-dragging");
+    els.radixDialog.hidden = true;
+    els.radixToolButton.setAttribute("aria-expanded", "false");
+    state.radixInputErrors.clear();
+    state.radixFields = [];
+    state.radixFieldInputErrors.clear();
+    state.radixActiveFieldKey = "";
+    state.radixFieldSelection = null;
+    state.radixStatus = "";
+    if (restoreFocus) els.radixToolButton.focus({ preventScroll: true });
+  }
+
+  async function copyRadixValue(kind) {
+    const value = kind === "hex" ? `0x${formatRadixValue(16)}` : kind === "bin" ? `0b${formatRadixValue(2)}` : formatRadixValue(10);
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+      else {
+        const helper = document.createElement("textarea");
+        helper.value = value;
+        helper.style.position = "fixed";
+        helper.style.opacity = "0";
+        document.body.append(helper);
+        helper.select();
+        document.execCommand("copy");
+        helper.remove();
+      }
+      setRadixStatus(`${kind.toUpperCase()} 已复制`);
+      window.setTimeout(() => setRadixStatus(), 1200);
+    } catch (error) {
+      setRadixStatus(`复制失败：${error.message || String(error)}`);
+    }
+  }
+
+  function handleRadixInput(event) {
+    const input = event.target.closest("[data-radix-input]");
+    if (!input) return;
+    const kind = input.dataset.radixInput;
+    const radix = kind === "hex" ? 16 : kind === "bin" ? 2 : 10;
+    const parsed = parseRadixValue(input.value, radix);
+    state.radixInputErrors.delete(kind);
+    if (!parsed.ok) {
+      state.radixInputErrors.add(kind);
+      input.closest(".radix-field")?.classList.add("invalid");
+      setRadixStatus(parsed.message);
+      return;
+    }
+    state.radixValue = parsed.value;
+    syncRadixFields(kind);
+    renderRadixBytes();
+    renderRadixBits();
+    syncRadixFieldValues();
+    setRadixStatus();
+  }
+
+  function handleRadixFieldInput(event) {
+    const nameInput = event.target.closest("[data-radix-field-name]");
+    if (nameInput) {
+      const field = state.radixFields.find((item) => getRadixFieldKey(item) === nameInput.dataset.radixFieldKey);
+      if (field) field.name = nameInput.value;
+      return;
+    }
+
+    const input = event.target.closest("[data-radix-field-input]");
+    if (!input) return;
+    const field = state.radixFields.find((item) => getRadixFieldKey(item) === input.dataset.radixFieldKey);
+    if (!field) return;
+    const kind = input.dataset.radixFieldInput;
+    const inputKey = `${getRadixFieldKey(field)}:${kind}`;
+    const parsed = parseRadixFieldValue(input.value, kind === "hex" ? 16 : 10, field);
+    state.radixFieldInputErrors.delete(inputKey);
+    if (!parsed.ok) {
+      state.radixFieldInputErrors.add(inputKey);
+      input.classList.add("invalid");
+      setRadixStatus(`${formatRadixFieldRange(field)}: ${parsed.message}`);
+      return;
+    }
+    const nextValue = (state.radixValue & ~getRadixFieldMask(field)) | (parsed.value << BigInt(field.low));
+    updateRadixValue(nextValue, "", inputKey);
+  }
+
+  function handleRadixFieldBlur(event) {
+    const input = event.target.closest("[data-radix-field-input]");
+    if (!input) return;
+    const key = input.dataset.radixFieldKey;
+    const inputKey = `${key}:${input.dataset.radixFieldInput}`;
+    if (!state.radixFieldInputErrors.has(inputKey)) syncRadixFieldValues();
+  }
+
+  function handleRadixInputBlur(event) {
+    const input = event.target.closest("[data-radix-input]");
+    if (!input) return;
+    const kind = input.dataset.radixInput;
+    if (!state.radixInputErrors.has(kind)) syncRadixFields();
+  }
+
+  function handleRadixOperation(operation) {
+    const mask = getRadixMask();
+    let value = state.radixValue & mask;
+    if (operation === "zero") value = 0n;
+    if (operation === "ones") value = mask;
+    if (operation === "invert") value = (~value) & mask;
+    if (operation === "increment") value = (value + 1n) & mask;
+    if (operation === "decrement") value = (value - 1n) & mask;
+    const direction = operation === "shift-left" ? "left" : operation === "shift-right" ? "right" : "";
+    if (direction) {
+      state.radixShiftCounts[direction] = getRadixShiftCount(direction);
+      syncRadixShiftControl(direction);
+      const shift = BigInt(state.radixShiftCounts[direction]);
+      if (direction === "left") value = (value << shift) & mask;
+      if (direction === "right") value >>= shift;
+    }
+    updateRadixValue(value);
+    els.radixInputs.querySelector("[data-radix-input='hex']")?.focus();
   }
 
   function formatReset(value, bitWidth) {
@@ -1933,7 +2538,12 @@
     state.view = view;
     els.matrixView.classList.toggle("hidden", view !== "matrix");
     els.tableView.classList.toggle("hidden", view !== "table");
-    els.viewButtons.forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+    els.viewButtons.forEach((button) => {
+      const active = button.dataset.view === view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
     hideHoverPanel();
   }
 
@@ -1982,6 +2592,104 @@
     els.attachmentsDialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       closeAttachmentsDialog();
+    });
+    els.radixToolButton.addEventListener("click", openRadixDialog);
+    els.radixDialogCloseButton.addEventListener("click", closeRadixDialog);
+    els.radixDialogDragHandle.addEventListener("pointerdown", startRadixDrag);
+    els.radixDialogDragHandle.addEventListener("pointermove", moveRadixDrag);
+    els.radixDialogDragHandle.addEventListener("pointerup", endRadixDrag);
+    els.radixDialogDragHandle.addEventListener("pointercancel", endRadixDrag);
+    els.radixWidthControl.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-radix-width]");
+      if (!button) return;
+      const nextWidth = Number(button.dataset.radixWidth);
+      if (![8, 16, 32, 64].includes(nextWidth)) return;
+      if (nextWidth === state.radixBitWidth) return;
+      state.radixBitWidth = nextWidth;
+      state.radixValue &= getRadixMask();
+      state.radixShiftCounts.left = Math.min(state.radixShiftCounts.left, nextWidth);
+      state.radixShiftCounts.right = Math.min(state.radixShiftCounts.right, nextWidth);
+      state.radixInputErrors.clear();
+      state.radixStatus = "";
+      resetRadixFields();
+      renderRadixDialog();
+      clampOpenRadixDialog();
+      scrollRadixFieldIntoView();
+    });
+    els.radixSignedControl.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-radix-signed]");
+      if (!button) return;
+      state.radixSigned = button.dataset.radixSigned === "true";
+      state.radixInputErrors.clear();
+      state.radixStatus = "";
+      renderRadixDialog();
+    });
+    els.radixInputs.addEventListener("input", handleRadixInput);
+    els.radixInputs.addEventListener("blur", handleRadixInputBlur, true);
+    els.radixFieldsResetButton.addEventListener("click", () => {
+      resetRadixFields();
+      renderRadixBits();
+      renderRadixFields();
+      scrollRadixFieldIntoView();
+      setRadixStatus();
+    });
+    els.radixFieldList.addEventListener("input", handleRadixFieldInput);
+    els.radixFieldList.addEventListener("blur", handleRadixFieldBlur, true);
+    els.radixFieldList.addEventListener("click", (event) => {
+      const fieldCell = event.target.closest(".radix-field-cell[data-radix-field-key]");
+      if (!fieldCell) return;
+      const key = fieldCell.dataset.radixFieldKey;
+      if (!state.radixFields.some((field) => getRadixFieldKey(field) === key)) return;
+      setRadixActiveField(key);
+    });
+    els.radixFieldList.addEventListener("focusin", (event) => {
+      const fieldCell = event.target.closest(".radix-field-cell[data-radix-field-key]");
+      if (fieldCell) setRadixActiveField(fieldCell.dataset.radixFieldKey);
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!state.radixActiveFieldKey || event.target.closest(".radix-field-cell[data-radix-field-key]")) return;
+      setRadixActiveField();
+    });
+    els.radixBits.addEventListener("pointerdown", startRadixFieldSelection);
+    els.radixBits.addEventListener("pointermove", moveRadixFieldSelection);
+    els.radixBits.addEventListener("pointerup", endRadixFieldSelection);
+    els.radixBits.addEventListener("pointercancel", cancelRadixFieldSelection);
+    Object.entries(els.radixShiftInputs).forEach(([direction, input]) => {
+      input.addEventListener("input", () => {
+        const parsed = Number.parseInt(input.value, 10);
+        if (Number.isInteger(parsed) && parsed >= 1) {
+          state.radixShiftCounts[direction] = Math.min(state.radixBitWidth, parsed);
+        }
+      });
+      input.addEventListener("blur", () => syncRadixShiftControl(direction));
+      input.addEventListener("change", () => syncRadixShiftControl(direction));
+    });
+    els.radixInputs.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-radix-copy]");
+      if (button) copyRadixValue(button.dataset.radixCopy);
+    });
+    els.radixBits.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-radix-bit-value]");
+      if (!button) return;
+      const bit = BigInt(button.dataset.radixBitValue);
+      updateRadixValue(state.radixValue ^ (1n << bit));
+    });
+    els.radixOperations.addEventListener("click", (event) => {
+      const shiftStep = event.target.closest("[data-radix-shift-direction]");
+      if (shiftStep) {
+        const direction = shiftStep.dataset.radixShiftDirection;
+        const delta = Number(shiftStep.dataset.radixShiftDelta);
+        if (!["left", "right"].includes(direction) || !Number.isInteger(delta)) return;
+        state.radixShiftCounts[direction] = Math.min(
+          state.radixBitWidth,
+          Math.max(1, state.radixShiftCounts[direction] + delta),
+        );
+        syncRadixShiftControl(direction);
+        els.radixShiftInputs[direction].focus();
+        return;
+      }
+      const button = event.target.closest("[data-radix-operation]");
+      if (button) handleRadixOperation(button.dataset.radixOperation);
     });
     els.addAttachmentsButton.addEventListener("click", addAttachments);
     els.attachmentsList.addEventListener("click", handleAttachmentAction);
@@ -2095,6 +2803,7 @@
     document.addEventListener("click", (event) => {
       if (els.hoverPanel.hidden) return;
       if (els.hoverPanel.contains(event.target)) return;
+      if (els.radixDialog.contains(event.target)) return;
       if (event.target.closest("#matrixGrid .has-register")) return;
       if (event.target.closest("dialog[open], .library-backdrop:not([hidden]), .theme-menu, .theme-button")) return;
       hideHoverPanel();
@@ -2107,13 +2816,20 @@
           return;
         }
         if (els.noteDialog.open || els.attachmentsDialog.open || els.importResultDialog.open) return;
+        if (!els.radixDialog.hidden) {
+          closeRadixDialog();
+          return;
+        }
         if (state.libraryOpen) closeLibrary();
         else hideHoverPanel();
       }
     });
 
     window.addEventListener("scroll", repositionOrHideDetailPanel, { capture: true, passive: true });
-    window.addEventListener("resize", repositionOrHideDetailPanel);
+    window.addEventListener("resize", () => {
+      repositionOrHideDetailPanel();
+      clampOpenRadixDialog();
+    });
   }
 
   function init() {
