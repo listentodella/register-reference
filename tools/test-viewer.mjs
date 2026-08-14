@@ -40,6 +40,7 @@ try {
   await page.locator("#radixToolButton").click();
   await page.waitForSelector("#radixDialog:not([hidden])");
   assert.equal(await page.locator("#radixToolButton").getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator(".radix-dialog-body > :first-child").evaluate((element) => element.matches(".calculator-section")), true);
   await page.locator("#tableViewButton").click();
   assert.equal(await page.locator("#tableViewButton").getAttribute("aria-selected"), "true");
   assert.equal(await page.locator("#radixDialog").isVisible(), true);
@@ -47,6 +48,49 @@ try {
   assert.equal(await page.locator("#radixWidthControl [aria-selected='true']").getAttribute("data-radix-width"), "32");
   assert.equal(await page.locator("#radixHexInput").inputValue(), "00000000");
   assert.equal(await page.locator("#radixBinInput").inputValue(), "0".repeat(32));
+  assert.equal(await page.locator(".calculator-terminal button").count(), 0);
+  assert.equal(await page.locator("#calculatorClearButton").isDisabled(), true);
+  const calculate = async (expression) => {
+    await page.locator("#calculatorInput").fill(expression);
+    await page.locator("#calculatorInput").press("Enter");
+    return page.locator("#calculatorHistory .calculator-entry").last();
+  };
+  const assertCalculation = async (expression, dec, hex) => {
+    const entry = await calculate(expression);
+    assert.equal(await entry.locator("[data-calculator-dec]").innerText(), dec);
+    assert.equal(await entry.locator("[data-calculator-hex]").innerText(), hex);
+  };
+  await assertCalculation("1 + 2 * 3", "7", "0x7");
+  assert.equal(await page.locator("#calculatorClearButton").isEnabled(), true);
+  await assertCalculation("0xFF & 0x0F", "15", "0xF");
+  await assertCalculation("(0x12 << 8) | 0x34", "4660", "0x1234");
+  await assertCalculation("0xFFFFFFFFFFFFFFFF + 1", "18446744073709551616", "0x10000000000000000");
+  await assertCalculation("1_000 + 24", "1024", "0x400");
+  await assertCalculation("-7 // 2", "-4", "-0x4");
+  await assertCalculation("1 / 2", "0.5", "0x0.8");
+  await assertCalculation("ans + 1", "1.5", "0x1.8");
+  const divisionError = await calculate("1 / 0");
+  assert.match(await divisionError.locator("[data-calculator-error]").innerText(), /除数不能为 0/);
+  assert.equal(await page.locator("#calculatorHistory .calculator-entry").last().evaluate((entry) => entry.classList.contains("error")), true);
+  await assertCalculation("ans", "1.5", "0x1.8");
+  const memberError = await calculate("window.location");
+  assert.match(await memberError.locator("[data-calculator-error]").innerText(), /仅支持数字、括号和算术或位运算符/);
+  const callError = await calculate("max(1, 2)");
+  assert.match(await callError.locator("[data-calculator-error]").innerText(), /仅支持数字、括号和算术或位运算符/);
+  await page.locator("#calculatorInput").fill("draft");
+  await page.locator("#calculatorInput").press("ArrowUp");
+  assert.equal(await page.locator("#calculatorInput").inputValue(), "max(1, 2)");
+  await page.locator("#calculatorInput").press("ArrowDown");
+  assert.equal(await page.locator("#calculatorInput").inputValue(), "draft");
+  await page.locator("#calculatorInput").fill("2 + 2");
+  await page.locator("#calculatorClearButton").click();
+  assert.equal(await page.locator("#calculatorHistory .calculator-entry").count(), 0);
+  assert.equal(await page.locator("#calculatorClearButton").isDisabled(), true);
+  assert.equal(await page.locator("#calculatorInput").inputValue(), "2 + 2");
+  await page.locator("#calculatorInput").fill("ans");
+  const clearedAnswerError = await calculate("ans");
+  assert.match(await clearedAnswerError.locator("[data-calculator-error]").innerText(), /还没有上一条计算结果/);
+  await page.locator("#calculatorClearButton").click();
   assert.equal(await page.locator("#radixBits .radix-bit").count(), 32);
   assert.equal(await page.locator("#radixBits .radix-bit").first().getAttribute("data-radix-bit"), "31");
   assert.equal(await page.locator("#radixBits .radix-bit").nth(8).getAttribute("data-radix-bit"), "23");
@@ -190,11 +234,23 @@ try {
   assert.ok(radixPanel64.y >= toolbarBox.y + toolbarBox.height, "64-bit panel should remain below the toolbar");
   assert.ok(radixPanel64.width >= 1000, "64-bit panel should expand its composition workspace");
   assert.equal(await page.locator(".radix-dialog-body").evaluate((body) => getComputedStyle(body).overflowY), "auto");
+  assert.equal(await page.locator("[data-radix-resize]").count(), 8);
   await page.locator("#radixHexInput").fill("FEDCBA9876543210");
   assert.equal(await page.locator("#radixDecInput").inputValue(), "18364758544493064720");
   await page.locator("#radixHexInput").fill("10000000000000000");
   assert.match(await page.locator("#radixValueStatus").innerText(), /超出当前 64 bit/);
   assert.equal(await page.locator(".radix-field[data-radix-field='hex']").evaluate((field) => field.classList.contains("invalid")), true);
+  const radixBeforeResize = await page.locator("#radixDialog").boundingBox();
+  const radixResizeHandle = await page.locator("[data-radix-resize='se']").boundingBox();
+  await page.mouse.move(radixResizeHandle.x + radixResizeHandle.width / 2, radixResizeHandle.y + radixResizeHandle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(radixResizeHandle.x - 180, radixResizeHandle.y - 120, { steps: 4 });
+  await page.mouse.up();
+  const radixAfterResize = await page.locator("#radixDialog").boundingBox();
+  assert.ok(radixAfterResize.width < radixBeforeResize.width - 150, "radix tool should follow a corner width resize");
+  assert.ok(radixAfterResize.height < radixBeforeResize.height - 90, "radix tool should follow a corner height resize");
+  assert.equal(Math.round(radixAfterResize.x), Math.round(radixBeforeResize.x));
+  assert.equal(Math.round(radixAfterResize.y), Math.round(radixBeforeResize.y));
   const radixBeforeDrag = await page.locator("#radixDialog").boundingBox();
   const radixHeader = await page.locator("#radixDialogDragHandle").boundingBox();
   await page.mouse.move(radixHeader.x + 80, radixHeader.y + 18);
@@ -208,6 +264,9 @@ try {
   assert.equal(await page.locator("#radixToolButton").getAttribute("aria-expanded"), "false");
   await page.locator("#radixToolButton").click();
   await page.waitForSelector("#radixDialog:not([hidden])");
+  const radixAfterReopen = await page.locator("#radixDialog").boundingBox();
+  assert.equal(Math.round(radixAfterReopen.width), Math.round(radixAfterResize.width));
+  assert.equal(Math.round(radixAfterReopen.height), Math.round(radixAfterResize.height));
   assert.deepEqual(await page.locator("#radixFieldList .radix-field-range").allTextContents(), ["63:0"]);
   assert.equal(await page.locator("#radixFieldList [data-radix-field-name]").inputValue(), "");
   await page.keyboard.press("Escape");
@@ -425,6 +484,17 @@ pages:
   await mobilePage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   await mobilePage.locator("#radixToolButton").click();
   await mobilePage.waitForSelector("#radixDialog:not([hidden])");
+  assert.equal(await mobilePage.locator("[data-radix-resize]").first().isVisible(), false);
+  assert.equal(await mobilePage.locator(".calculator-terminal button").count(), 0);
+  await mobilePage.locator("#calculatorInput").fill("0x20 + 10");
+  await mobilePage.locator("#calculatorInput").press("Enter");
+  assert.equal(await mobilePage.locator("#calculatorHistory [data-calculator-dec]").last().innerText(), "42");
+  assert.equal(await mobilePage.locator("#calculatorHistory [data-calculator-hex]").last().innerText(), "0x2A");
+  assert.equal(
+    await mobilePage.locator(".calculator-terminal").evaluate((terminal) => terminal.scrollWidth <= terminal.clientWidth),
+    true,
+    "mobile calculator should not overflow horizontally",
+  );
   const mobilePanelBeforeDrag = await mobilePage.locator("#radixDialog").boundingBox();
   const mobileHeader = await mobilePage.locator("#radixDialogDragHandle").boundingBox();
   await mobilePage.mouse.move(mobileHeader.x + 60, mobileHeader.y + 16);

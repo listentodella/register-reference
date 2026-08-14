@@ -1095,6 +1095,13 @@ fn build_standalone_html(records: &[ChipRecord], include_notes: bool) -> Result<
         ),
     );
     html = html.replace(
+        "<script src=\"vendor/jsep.min.js\"></script>",
+        &format!(
+            "<script>{}</script>",
+            include_str!("../../vendor/jsep.min.js")
+        ),
+    );
+    html = html.replace(
         "<script src=\"app.js\"></script>",
         &format!("<script>{}</script>", include_str!("../../app.js")),
     );

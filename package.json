@@ -18,6 +18,7 @@
     "yaml": "2.9.0"
   },
   "dependencies": {
+    "jsep": "1.4.0",
     "lucide": "1.30.0"
   }
 }

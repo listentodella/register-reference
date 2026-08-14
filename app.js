@@ -40,7 +40,13 @@
     radixFieldSelection: null,
     radixStatus: "",
     radixPosition: null,
+    radixSize: null,
     radixDrag: null,
+    radixResize: null,
+    calculatorCommands: [],
+    calculatorHistoryIndex: 0,
+    calculatorDraft: "",
+    calculatorLastResult: null,
     themePreference: "light",
     themeMenuOpen: false,
   };
@@ -92,6 +98,7 @@
     radixDialog: document.getElementById("radixDialog"),
     radixDialogDragHandle: document.getElementById("radixDialogDragHandle"),
     radixDialogCloseButton: document.getElementById("radixDialogCloseButton"),
+    radixResizeHandles: Array.from(document.querySelectorAll("[data-radix-resize]")),
     radixWidthControl: document.getElementById("radixWidthControl"),
     radixSignedControl: document.getElementById("radixSignedControl"),
     radixValueStatus: document.getElementById("radixValueStatus"),
@@ -107,6 +114,10 @@
       right: document.getElementById("radixShiftRightInput"),
     },
     radixOperations: document.getElementById("radixOperations"),
+    calculatorHistory: document.getElementById("calculatorHistory"),
+    calculatorForm: document.getElementById("calculatorForm"),
+    calculatorInput: document.getElementById("calculatorInput"),
+    calculatorClearButton: document.getElementById("calculatorClearButton"),
     noteDialog: document.getElementById("noteDialog"),
     noteDialogTitle: document.getElementById("noteDialogTitle"),
     noteDialogRegister: document.getElementById("noteDialogRegister"),
@@ -947,7 +958,21 @@
 
   function clampOpenRadixDialog() {
     if (els.radixDialog.hidden) return;
-    if (window.innerWidth <= 560 || !state.radixPosition) {
+    if (window.innerWidth <= 560) {
+      els.radixDialog.style.removeProperty("width");
+      els.radixDialog.style.removeProperty("height");
+      dockRadixDialog();
+      return;
+    }
+    if (state.radixSize) {
+      const margin = radixDialogMargin();
+      const width = Math.min(Math.max(520, state.radixSize.width), window.innerWidth - margin * 2);
+      const height = Math.min(Math.max(360, state.radixSize.height), window.innerHeight - margin * 2);
+      state.radixSize = { width, height };
+      els.radixDialog.style.width = `${Math.round(width)}px`;
+      els.radixDialog.style.height = `${Math.round(height)}px`;
+    }
+    if (!state.radixPosition) {
       dockRadixDialog();
       return;
     }
@@ -986,6 +1011,71 @@
     els.radixDialog.classList.remove("is-dragging");
   }
 
+  function canResizeRadixDialog() {
+    return window.innerWidth > 560;
+  }
+
+  function startRadixResize(event) {
+    if (event.button !== 0 || !canResizeRadixDialog()) return;
+    const direction = event.currentTarget.dataset.radixResize;
+    if (!/^(?:n|ne|e|se|s|sw|w|nw)$/.test(direction)) return;
+    const rect = els.radixDialog.getBoundingClientRect();
+    state.radixResize = {
+      pointerId: event.pointerId,
+      handle: event.currentTarget,
+      direction,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+    };
+    els.radixDialog.classList.add("is-resizing");
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function moveRadixResize(event) {
+    const resize = state.radixResize;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const margin = radixDialogMargin();
+    const minWidth = Math.min(520, window.innerWidth - margin * 2);
+    const minHeight = Math.min(360, window.innerHeight - margin * 2);
+    const deltaX = event.clientX - resize.startX;
+    const deltaY = event.clientY - resize.startY;
+    let { left, top, right, bottom } = resize;
+
+    if (resize.direction.includes("e")) {
+      right = Math.min(window.innerWidth - margin, Math.max(left + minWidth, resize.right + deltaX));
+    }
+    if (resize.direction.includes("w")) {
+      left = Math.max(margin, Math.min(right - minWidth, resize.left + deltaX));
+    }
+    if (resize.direction.includes("s")) {
+      bottom = Math.min(window.innerHeight - margin, Math.max(top + minHeight, resize.bottom + deltaY));
+    }
+    if (resize.direction.includes("n")) {
+      top = Math.max(margin, Math.min(bottom - minHeight, resize.top + deltaY));
+    }
+
+    state.radixPosition = { left, top };
+    state.radixSize = { width: right - left, height: bottom - top };
+    els.radixDialog.style.left = `${Math.round(left)}px`;
+    els.radixDialog.style.top = `${Math.round(top)}px`;
+    els.radixDialog.style.width = `${Math.round(state.radixSize.width)}px`;
+    els.radixDialog.style.height = `${Math.round(state.radixSize.height)}px`;
+  }
+
+  function endRadixResize(event) {
+    const resize = state.radixResize;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    if (resize.handle.hasPointerCapture?.(event.pointerId)) resize.handle.releasePointerCapture(event.pointerId);
+    state.radixResize = null;
+    els.radixDialog.classList.remove("is-resizing");
+  }
+
   function openRadixDialog() {
     if (!els.radixDialog.hidden) {
       clampOpenRadixDialog();
@@ -1017,6 +1107,13 @@
     }
     state.radixDrag = null;
     els.radixDialog.classList.remove("is-dragging");
+    const resizePointerId = state.radixResize?.pointerId;
+    const resizeHandle = state.radixResize?.handle;
+    if (resizePointerId != null && resizeHandle?.hasPointerCapture?.(resizePointerId)) {
+      resizeHandle.releasePointerCapture(resizePointerId);
+    }
+    state.radixResize = null;
+    els.radixDialog.classList.remove("is-resizing");
     els.radixDialog.hidden = true;
     els.radixToolButton.setAttribute("aria-expanded", "false");
     state.radixInputErrors.clear();
@@ -1129,6 +1226,216 @@
     }
     updateRadixValue(value);
     els.radixInputs.querySelector("[data-radix-input='hex']")?.focus();
+  }
+
+  function normalizeCalculatorExpression(expression) {
+    let normalized = String(expression || "").trim();
+    const replacePrefixedInteger = (pattern) => {
+      normalized = normalized.replace(pattern, (_match, prefix, literal) => {
+        try {
+          return `${prefix}${BigInt(literal.replace(/_/g, "")).toString(10)}`;
+        } catch (_error) {
+          throw new Error(`无效整数：${literal}`);
+        }
+      });
+    };
+    replacePrefixedInteger(/(^|[^A-Za-z0-9_$])(0[xX][0-9a-fA-F](?:_?[0-9a-fA-F])*)/g);
+    replacePrefixedInteger(/(^|[^A-Za-z0-9_$])(0[bB][01](?:_?[01])*)/g);
+    replacePrefixedInteger(/(^|[^A-Za-z0-9_$])(0[oO][0-7](?:_?[0-7])*)/g);
+    while (/(\d)_(?=\d)/.test(normalized)) normalized = normalized.replace(/(\d)_(?=\d)/g, "$1");
+    return normalized;
+  }
+
+  function validateCalculatorResult(value) {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new Error("结果超出可表示范围");
+      return value;
+    }
+    if (typeof value !== "bigint") throw new Error("表达式结果不是数值");
+    const magnitude = value < 0n ? -value : value;
+    if (magnitude.toString(2).length > 65536) throw new Error("整数结果过大");
+    return value;
+  }
+
+  function calculatorNumber(value) {
+    if (typeof value === "number") return value;
+    const converted = Number(value);
+    if (!Number.isFinite(converted)) throw new Error("数值过大，无法转换为浮点数");
+    return converted;
+  }
+
+  function calculatorInteger(value) {
+    if (typeof value === "bigint") return value;
+    if (!Number.isSafeInteger(value)) throw new Error("位运算仅支持精确整数");
+    return BigInt(value);
+  }
+
+  function calculatorFloorDivide(left, right) {
+    if (typeof left !== "bigint" || typeof right !== "bigint") {
+      const divisor = calculatorNumber(right);
+      if (divisor === 0) throw new Error("除数不能为 0");
+      return Math.floor(calculatorNumber(left) / divisor);
+    }
+    if (right === 0n) throw new Error("除数不能为 0");
+    let quotient = left / right;
+    const remainder = left % right;
+    if (remainder !== 0n && (remainder > 0n) !== (right > 0n)) quotient -= 1n;
+    return quotient;
+  }
+
+  function calculatorModulo(left, right) {
+    if (typeof left !== "bigint" || typeof right !== "bigint") {
+      const dividend = calculatorNumber(left);
+      const divisor = calculatorNumber(right);
+      if (divisor === 0) throw new Error("除数不能为 0");
+      let remainder = dividend % divisor;
+      if (remainder !== 0 && (remainder > 0) !== (divisor > 0)) remainder += divisor;
+      return remainder;
+    }
+    if (right === 0n) throw new Error("除数不能为 0");
+    let remainder = left % right;
+    if (remainder !== 0n && (remainder > 0n) !== (right > 0n)) remainder += right;
+    return remainder;
+  }
+
+  function evaluateCalculatorBinary(operator, left, right) {
+    const bothIntegers = typeof left === "bigint" && typeof right === "bigint";
+    if (operator === "+") return bothIntegers ? left + right : calculatorNumber(left) + calculatorNumber(right);
+    if (operator === "-") return bothIntegers ? left - right : calculatorNumber(left) - calculatorNumber(right);
+    if (operator === "*") return bothIntegers ? left * right : calculatorNumber(left) * calculatorNumber(right);
+    if (operator === "/") {
+      const divisor = calculatorNumber(right);
+      if (divisor === 0) throw new Error("除数不能为 0");
+      return calculatorNumber(left) / divisor;
+    }
+    if (operator === "//") return calculatorFloorDivide(left, right);
+    if (operator === "%") return calculatorModulo(left, right);
+    if (operator === "**") {
+      if (bothIntegers && right >= 0n) {
+        if (right > 10000n) throw new Error("指数过大");
+        return left ** right;
+      }
+      return calculatorNumber(left) ** calculatorNumber(right);
+    }
+    if (["<<", ">>", "&", "|", "^"].includes(operator)) {
+      const integerLeft = calculatorInteger(left);
+      const integerRight = calculatorInteger(right);
+      if (["<<", ">>"].includes(operator) && (integerRight < 0n || integerRight > 65536n)) {
+        throw new Error("移位位数必须在 0 到 65536 之间");
+      }
+      if (operator === "<<") return integerLeft << integerRight;
+      if (operator === ">>") return integerLeft >> integerRight;
+      if (operator === "&") return integerLeft & integerRight;
+      if (operator === "|") return integerLeft | integerRight;
+      return integerLeft ^ integerRight;
+    }
+    throw new Error(`不支持运算符 ${operator}`);
+  }
+
+  function evaluateCalculatorNode(node) {
+    if (node.type === "Literal") {
+      if (typeof node.value !== "number") throw new Error("仅支持数字字面量");
+      if (/^\d+$/.test(node.raw || "")) return BigInt(node.raw);
+      return validateCalculatorResult(node.value);
+    }
+    if (node.type === "Identifier") {
+      if (!["ans", "_"].includes(node.name)) throw new Error(`未知名称 ${node.name}`);
+      if (state.calculatorLastResult === null) throw new Error("还没有上一条计算结果");
+      return state.calculatorLastResult;
+    }
+    if (node.type === "UnaryExpression") {
+      const value = evaluateCalculatorNode(node.argument);
+      if (node.operator === "+") return value;
+      if (node.operator === "-") return validateCalculatorResult(-value);
+      if (node.operator === "~") return validateCalculatorResult(~calculatorInteger(value));
+      throw new Error(`不支持一元运算符 ${node.operator}`);
+    }
+    if (node.type === "BinaryExpression") {
+      const value = evaluateCalculatorBinary(node.operator, evaluateCalculatorNode(node.left), evaluateCalculatorNode(node.right));
+      return validateCalculatorResult(value);
+    }
+    throw new Error("仅支持数字、括号和算术或位运算符");
+  }
+
+  function calculateExpression(expression) {
+    if (!window.jsep) throw new Error("计算器解析器未加载");
+    const normalized = normalizeCalculatorExpression(expression);
+    if (!normalized) throw new Error("请输入表达式");
+    return evaluateCalculatorNode(window.jsep(normalized));
+  }
+
+  function formatCalculatorResult(value) {
+    return typeof value === "bigint" ? value.toString(10) : String(value);
+  }
+
+  function formatCalculatorHexResult(value) {
+    const negative = value < 0;
+    const magnitude = negative ? -value : value;
+    return `${negative ? "-" : ""}0x${magnitude.toString(16).toUpperCase()}`;
+  }
+
+  function appendCalculatorEntry(expression, result, error = false) {
+    const entry = document.createElement("div");
+    entry.className = `calculator-entry ${error ? "error" : ""}`;
+    const resultMarkup = error
+      ? `<div class="calculator-result"><span class="calculator-result-marker" aria-hidden="true">!</span><output data-calculator-error>${escapeHtml(result)}</output></div>`
+      : `
+        <div class="calculator-result" data-calculator-result>
+          <span class="calculator-result-marker" aria-hidden="true">=</span>
+          <div class="calculator-result-values">
+            <span class="calculator-result-value"><span class="calculator-result-base">DEC</span><output data-calculator-dec aria-label="十进制结果">${escapeHtml(formatCalculatorResult(result))}</output></span>
+            <span class="calculator-result-value"><span class="calculator-result-base">HEX</span><output data-calculator-hex aria-label="十六进制结果">${escapeHtml(formatCalculatorHexResult(result))}</output></span>
+          </div>
+        </div>
+      `;
+    entry.innerHTML = `
+      <div class="calculator-expression"><span aria-hidden="true">&gt;&gt;&gt;</span><code>${escapeHtml(expression)}</code></div>
+      ${resultMarkup}
+    `;
+    els.calculatorHistory.append(entry);
+    while (els.calculatorHistory.children.length > 50) els.calculatorHistory.firstElementChild.remove();
+    els.calculatorHistory.scrollTop = els.calculatorHistory.scrollHeight;
+    els.calculatorClearButton.disabled = false;
+  }
+
+  function submitCalculatorExpression() {
+    const expression = els.calculatorInput.value.trim();
+    if (!expression) return;
+    state.calculatorCommands.push(expression);
+    if (state.calculatorCommands.length > 100) state.calculatorCommands.shift();
+    state.calculatorHistoryIndex = state.calculatorCommands.length;
+    state.calculatorDraft = "";
+    try {
+      const result = calculateExpression(expression);
+      state.calculatorLastResult = result;
+      appendCalculatorEntry(expression, result);
+    } catch (error) {
+      appendCalculatorEntry(expression, error.message || String(error), true);
+    }
+    els.calculatorInput.value = "";
+  }
+
+  function clearCalculatorHistory() {
+    els.calculatorHistory.replaceChildren();
+    state.calculatorCommands = [];
+    state.calculatorHistoryIndex = 0;
+    state.calculatorDraft = "";
+    state.calculatorLastResult = null;
+    els.calculatorClearButton.disabled = true;
+    els.calculatorInput.focus();
+  }
+
+  function navigateCalculatorHistory(direction) {
+    if (!state.calculatorCommands.length) return;
+    if (state.calculatorHistoryIndex === state.calculatorCommands.length) state.calculatorDraft = els.calculatorInput.value;
+    state.calculatorHistoryIndex = Math.min(
+      state.calculatorCommands.length,
+      Math.max(0, state.calculatorHistoryIndex + direction),
+    );
+    els.calculatorInput.value = state.calculatorHistoryIndex === state.calculatorCommands.length
+      ? state.calculatorDraft
+      : state.calculatorCommands[state.calculatorHistoryIndex];
+    els.calculatorInput.setSelectionRange(els.calculatorInput.value.length, els.calculatorInput.value.length);
   }
 
   function formatReset(value, bitWidth) {
@@ -2599,6 +2906,12 @@
     els.radixDialogDragHandle.addEventListener("pointermove", moveRadixDrag);
     els.radixDialogDragHandle.addEventListener("pointerup", endRadixDrag);
     els.radixDialogDragHandle.addEventListener("pointercancel", endRadixDrag);
+    els.radixResizeHandles.forEach((handle) => {
+      handle.addEventListener("pointerdown", startRadixResize);
+      handle.addEventListener("pointermove", moveRadixResize);
+      handle.addEventListener("pointerup", endRadixResize);
+      handle.addEventListener("pointercancel", endRadixResize);
+    });
     els.radixWidthControl.addEventListener("click", (event) => {
       const button = event.target.closest("[data-radix-width]");
       if (!button) return;
@@ -2691,6 +3004,16 @@
       const button = event.target.closest("[data-radix-operation]");
       if (button) handleRadixOperation(button.dataset.radixOperation);
     });
+    els.calculatorForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCalculatorExpression();
+    });
+    els.calculatorInput.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      navigateCalculatorHistory(event.key === "ArrowUp" ? -1 : 1);
+    });
+    els.calculatorClearButton.addEventListener("click", clearCalculatorHistory);
     els.addAttachmentsButton.addEventListener("click", addAttachments);
     els.attachmentsList.addEventListener("click", handleAttachmentAction);
     els.libraryCloseButton.addEventListener("click", closeLibrary);
@@ -2833,6 +3156,7 @@
   }
 
   function init() {
+    window.jsep?.addBinaryOp("//", 10);
     applyTheme(readStoredTheme(), false);
     bindEvents();
     populateChipSelect();

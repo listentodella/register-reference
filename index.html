@@ -219,6 +219,24 @@
           </button>
         </header>
         <div class="radix-dialog-body">
+          <section class="radix-inspector-section calculator-section" aria-labelledby="calculatorTitle">
+            <div class="radix-section-head">
+              <h3 id="calculatorTitle">计算器</h3>
+              <button id="calculatorClearButton" class="icon-button calculator-clear-button" type="button"
+                title="清除计算历史" aria-label="清除计算历史" disabled>
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+            <div class="calculator-terminal">
+              <div id="calculatorHistory" class="calculator-history" role="log" aria-live="polite" aria-relevant="additions"></div>
+              <form id="calculatorForm" class="calculator-form" autocomplete="off">
+                <span class="calculator-prompt" aria-hidden="true">&gt;&gt;&gt;</span>
+                <input id="calculatorInput" type="text" maxlength="500" spellcheck="false"
+                  autocapitalize="off" aria-label="计算表达式">
+              </form>
+            </div>
+          </section>
+
           <div class="radix-width-toolbar">
             <span class="radix-toolbar-label">位宽</span>
             <div id="radixWidthControl" class="radix-width-control" role="tablist" aria-label="转换位宽">
@@ -338,6 +356,14 @@
             </div>
           </section>
         </div>
+        <div class="radix-resize-handle" data-radix-resize="n" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="ne" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="e" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="se" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="s" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="sw" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="w" aria-hidden="true"></div>
+        <div class="radix-resize-handle" data-radix-resize="nw" aria-hidden="true"></div>
       </aside>
 
       <dialog id="noteDialog" class="note-dialog" aria-labelledby="noteDialogTitle">
@@ -401,6 +427,7 @@
     <script src="yaml-lite.js"></script>
     <script src="yaml-validator.js"></script>
     <script src="vendor/lucide.min.js"></script>
+    <script src="vendor/jsep.min.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
