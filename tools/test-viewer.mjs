@@ -301,7 +301,344 @@ try {
   await page.locator("#themeButton").click();
   await page.locator('[data-theme-option="light"]').click();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+
+  const systemRegisterYaml = `schema_version: 2
+sensor: "ARM_UI_TEST"
+vendor: "Arm"
+family: "A-profile"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Synthetic browser fixture"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Control:
+    access: "MRS / MSR"
+    desc: "Synthetic system-register category"
+    registers:
+      - name: "TEST_EL1"
+        access: "RW"
+        width: 16
+        bit_width: 128
+        desc: "Synthetic system register"
+        condition: "when FEAT_TEST is implemented"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 1
+          crm: 0
+          op2: 3
+        accessors:
+          - name: "TEST_EL1"
+            kind: "read"
+            instruction: "MRS <Xt>, TEST_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 0
+              op2: 3
+          - name: "TEST_EL1"
+            kind: "write"
+            instruction: "MSR TEST_EL1, <Xt>"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 0
+              op2: 3
+        fields:
+          - name: "SPLIT"
+            bits: "127:124,3:0"
+            desc: "Non-contiguous field"
+            values:
+              - value: "0b1010xxxx"
+                desc: "High nibble is A"
+          - name: "MODE_A"
+            bits: "7:4"
+            desc: "Conditional layout A"
+            condition: "When FEAT_A is implemented"
+          - name: "MODE_B"
+            bits: "7:4"
+            desc: "Conditional layout B"
+            condition: "Layout: !IsFeatureImplemented(FEAT_A)"
+`;
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "arm-ui-test.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(systemRegisterYaml),
+  });
+  await page.waitForFunction(() => Array.from(document.querySelectorAll("#chipSelect option")).some((option) => option.textContent === "ARM_UI_TEST"));
+  assert.equal(await page.locator("#chipSelect option:checked").innerText(), "ARM_UI_TEST");
+  assert.equal(await page.locator("#matrixViewButton").isHidden(), false);
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-label"), "全局预览");
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#matrixTitle").innerText(), "全局预览");
+  assert.equal(await page.locator(".system-overview-group").count(), 1);
+  assert.equal(await page.locator(".system-overview-register").count(), 1);
+  await page.locator(".system-overview-register").click();
+  await page.waitForFunction(() => document.querySelector("#tableViewButton")?.getAttribute("aria-selected") === "true");
+  assert.equal(await page.locator("#registerLocatorHeader").innerText(), "系统编码");
+  assert.equal(await page.locator("#registerTableBody tr").count(), 1);
+  assert.equal(await page.locator("#registerTableBody .system-encoding").innerText(), "S3_0_C1_C0_3");
+  assert.deepEqual(await page.locator("#registerTableBody .system-accessors .badge").allTextContents(), ["READ", "WRITE"]);
+  await page.locator("#registerTableBody .register-value-input").fill("0xA0000000000000000000000000000005");
+  const splitField = page.locator("#registerTableBody .field-row").filter({ hasText: "SPLIT" });
+  assert.match(await splitField.locator(".field-value").innerText(), /0xA5 \/ 165/);
+  assert.match(await splitField.locator(".enum-chip.active").innerText(), /0b1010xxxx/);
+  assert.equal(await page.locator("#registerTableBody .field-condition").count(), 2);
+  await page.locator("#searchInput").fill("FEAT_TEST");
+  assert.equal(await page.locator("#registerTableBody tr").count(), 1);
+  await page.locator("#searchInput").fill("");
+
+  const aarch32RegisterYaml = `schema_version: 2
+sensor: "ARM_A32_UI_TEST"
+vendor: "Arm"
+family: "A-profile"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch32"
+  profile: "A"
+source:
+  title: "Synthetic AArch32 browser fixture"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Special:
+    access: "architectural instructions"
+    desc: "Synthetic AArch32 encodings"
+    registers:
+      - name: "ELR_hyp"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "Banked special register"
+        encoding:
+          scheme: "aarch32_special"
+          r: 0
+          m: 1
+          m1: 14
+        accessors:
+          - name: "ELR_hyp"
+            kind: "read"
+            instruction: "MRS <Rd>, ELR_hyp"
+            encoding:
+              scheme: "aarch32_special"
+              r: 0
+              m: 1
+              m1: 14
+      - name: "FPSCR"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "VFP system register"
+        encoding:
+          scheme: "aarch32_vfp"
+          reg: 1
+        accessors:
+          - name: "FPSCR"
+            kind: "read"
+            instruction: "VMRS <Rt>, FPSCR"
+            encoding:
+              scheme: "aarch32_vfp"
+              reg: 1
+      - name: "DBGDTRTXint"
+        access: "WO"
+        width: 4
+        bit_width: 32
+        desc: "Debug coprocessor register"
+        encoding:
+          scheme: "aarch32_coproc"
+          coproc: 14
+          opc1: 0
+          crn: 0
+          crm: 5
+          opc2: 0
+        accessors:
+          - name: "DBGDTRTXint"
+            kind: "write"
+            instruction: "MCR p14, 0, <Rt>, c0, c5, 0"
+            encoding:
+              scheme: "aarch32_coproc"
+              coproc: 14
+              opc1: 0
+              crn: 0
+              crm: 5
+              opc2: 0
+      - name: "APSR"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "Selector-based special register"
+        encoding:
+          scheme: "aarch32_special"
+          selector: "APSR"
+        accessors:
+          - name: "APSR"
+            kind: "read"
+            instruction: "MRS <Rd>, APSR"
+            encoding:
+              scheme: "aarch32_special"
+              selector: "APSR"
+`;
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "arm-a32-ui-test.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(aarch32RegisterYaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "ARM_A32_UI_TEST");
+  assert.deepEqual(await page.locator("#registerTableBody .system-encoding").allTextContents(), [
+    "r=0, m=1, m1=14",
+    "reg=1",
+    "p14, 0, c0, c5, 0",
+    "selector=APSR",
+  ]);
+  await page.locator("#searchInput").fill("VMRS");
+  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["FPSCR"]);
+  await page.locator("#searchInput").fill("");
+
+  const mProfileBulkRegisters = Array.from({ length: 120 }, (_, index) => {
+    const address = (0xe0010000 + index * 4).toString(16).toUpperCase();
+    return `      - addr: 0x${address}\n        name: "BULK_${index}"\n        access: "RO"\n        width: 4\n        bit_width: 32\n        desc: "Synthetic bulk system register ${index}"`;
+  }).join("\n");
+  const mProfileRegisterYaml = `schema_version: 2
+sensor: "ARM_M_UI_TEST"
+vendor: "Arm"
+family: "Armv8-M Mainline"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "Armv8-M Mainline"
+  profile: "M"
+source:
+  title: "Synthetic M-profile browser fixture"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "Apache-2.0"
+pages:
+  Special Registers:
+    access: "MRS / MSR special-register interface"
+    desc: "Synthetic CPU special registers"
+    registers:
+      - name: "CONTROL"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "Control Register"
+        encoding:
+          scheme: "m_profile_special"
+          selector: "CONTROL"
+        accessors:
+          - name: "__get_CONTROL"
+            kind: "read"
+            instruction: "MRS <value>, CONTROL"
+            encoding:
+              scheme: "m_profile_special"
+              selector: "CONTROL"
+  Bulk:
+    access: "Memory-mapped Core Peripheral access"
+    desc: "Synthetic scroll fixture"
+    registers:
+${mProfileBulkRegisters}
+  SCB:
+    access: "Memory-mapped Core Peripheral access"
+    desc: "System Control Block"
+    registers:
+      - addr: 0xE000ED00
+        name: "CPUID"
+        access: "RO"
+        width: 4
+        bit_width: 32
+        desc: "CPUID Base Register"
+`;
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "arm-m-ui-test.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(mProfileRegisterYaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "ARM_M_UI_TEST");
+  assert.equal(await page.locator("#matrixViewButton").isHidden(), false);
+  assert.equal(await page.locator("#registerLocatorHeader").innerText(), "系统编码");
+  assert.deepEqual(await page.locator("#registerTableBody .system-encoding").allTextContents(), ["selector=CONTROL"]);
+  assert.equal(await page.locator("#registerTableBody .system-accessors .badge").innerText(), "READ");
+  await page.locator("#matrixViewButton").click();
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator(".system-overview-group").count(), 3);
+  assert.equal(await page.locator(".system-overview-register").count(), 122);
+  assert.equal(
+    await page.locator(".system-overview-index").evaluate((element) => getComputedStyle(element).position),
+    "sticky",
+  );
+  await page.evaluate(() => window.scrollTo(0, 520));
+  await page.waitForFunction(() => window.scrollY > 400);
+  const stickyPosition = await page.locator(".system-overview-index").evaluate((element) => {
+    const topbar = document.querySelector(".topbar").getBoundingClientRect();
+    const index = element.getBoundingClientRect();
+    return { indexTop: index.top, topbarBottom: topbar.bottom };
+  });
+  assert.ok(
+    Math.abs(stickyPosition.indexTop - stickyPosition.topbarBottom) <= 2,
+    `system category index should remain below the sticky topbar: ${JSON.stringify(stickyPosition)}`,
+  );
+  await page.locator(".system-overview-index-item").filter({ hasText: "SCB" }).click();
+  const anchoredGroupPosition = await page.locator("#system-overview-group-2").evaluate((element) => {
+    const index = document.querySelector(".system-overview-index").getBoundingClientRect();
+    return { groupTop: element.getBoundingClientRect().top, indexBottom: index.bottom };
+  });
+  assert.ok(
+    anchoredGroupPosition.groupTop >= anchoredGroupPosition.indexBottom,
+    `category target should remain below the sticky index: ${JSON.stringify(anchoredGroupPosition)}`,
+  );
+  const cpuidOverviewRegister = page.locator(".system-overview-register").filter({ hasText: "CPUID" });
+  await cpuidOverviewRegister.scrollIntoViewIfNeeded();
+  const overviewScrollY = await page.evaluate(() => window.scrollY);
+  assert.ok(overviewScrollY > 400, "CPUID should be deep enough to exercise scroll restoration");
+  await cpuidOverviewRegister.click();
+  await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "SCB");
+  assert.equal(await page.locator("#tableViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#systemOverviewBackButton").isVisible(), true);
+  await page.waitForSelector("#registerTableBody tr.is-target");
+  assert.equal(await page.locator("#registerTableBody tr.is-target").count(), 1);
+  assert.equal(await page.locator("#registerLocatorHeader").innerText(), "系统编码 / 地址");
+  assert.deepEqual(await page.locator("#registerTableBody .system-encoding").allTextContents(), ["0xE000ED00-0xE000ED03"]);
+  await page.goBack();
+  await page.waitForFunction(() => document.querySelector("#matrixViewButton")?.getAttribute("aria-selected") === "true");
+  assert.equal(await page.locator("#matrixTitle").innerText(), "全局预览");
+  assert.equal(await page.locator("#pageSelect").inputValue(), "Special Registers");
+  await page.waitForFunction((expected) => Math.abs(window.scrollY - expected) <= 2, overviewScrollY);
+  assert.ok(
+    Math.abs((await page.evaluate(() => window.scrollY)) - overviewScrollY) <= 2,
+    "back navigation should restore the overview scroll position",
+  );
+  await page.goForward();
+  await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "SCB");
+  assert.equal(await page.locator("#tableViewButton").getAttribute("aria-selected"), "true");
+  await page.waitForSelector("#registerTableBody tr.is-target");
+  await page.locator("#systemOverviewBackButton").click();
+  await page.waitForFunction(() => document.querySelector("#matrixViewButton")?.getAttribute("aria-selected") === "true");
+  await page.waitForFunction((expected) => Math.abs(window.scrollY - expected) <= 2, overviewScrollY);
+  assert.ok(
+    Math.abs((await page.evaluate(() => window.scrollY)) - overviewScrollY) <= 2,
+    "overview back button should restore the previous position",
+  );
+
   await page.selectOption("#chipSelect", { label: "RK3588_DWC3" });
+  await page.locator("#matrixViewButton").click();
+  assert.equal(await page.locator("#matrixViewButton").isVisible(), true);
+  assert.equal(await page.locator("#registerLocatorHeader").innerText(), "地址");
   assert.match(await page.locator("#statusBand").innerText(), /57 个寄存器/);
   assert.equal(await page.locator("#matrixGrid .reg-cell").count(), 352);
   assert.equal(await page.locator("#matrixGrid .address-gap").count(), 8);
@@ -358,19 +695,8 @@ try {
   await page.locator("#hoverPanel").waitFor({ state: "hidden" });
   await firstRegisterCell.click();
   await page.waitForSelector("#hoverPanel:not([hidden])");
-
-  await page.selectOption("#chipSelect", { label: "QMI8660" });
-  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /INT_HELPER|DATA_ALL/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="88"]').innerText(), /INT_STATUS0/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="96"]').innerText(), /gyr/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="102"]').innerText(), /acc/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="108"]').innerText(), /tmp/);
-  await page.selectOption("#pageSelect", { label: "OIS" });
-  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /DATA_ALL/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="82"]').innerText(), /gyr/);
-  await page.selectOption("#chipSelect", { label: "QMA6100P" });
-  assert.doesNotMatch(await page.locator("#matrixGrid").innerText(), /ACC_DATA/);
-  assert.match(await page.locator('#matrixGrid .has-register[data-address="1"]').innerText(), /X_OUT_LSB/);
+  await page.keyboard.press("Escape");
+  await page.locator("#hoverPanel").waitFor({ state: "hidden" });
 
   const yaml64 = `schema_version: 1
 sensor: TEST64

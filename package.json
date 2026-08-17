@@ -5,6 +5,10 @@
   "scripts": {
     "data:build": "node tools/build-data.mjs",
     "web:build": "npm run data:build && node tools/build-web.mjs",
+    "arm:import": "node tools/import-arm-mrs.mjs",
+    "arm:cmsis-import": "node tools/import-arm-cmsis.mjs",
+    "test:arm-import": "node tools/test-arm-mrs-importer.mjs && node tools/test-arm-cmsis-importer.mjs",
+    "test:arm-cmsis-import": "node tools/test-arm-cmsis-importer.mjs",
     "test:web": "npm run web:build && node tools/test-viewer.mjs",
     "test:web:webkit": "npm run web:build && cross-env BROWSER_ENGINE=webkit node tools/test-viewer.mjs",
     "tauri": "tauri",
@@ -13,8 +17,10 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
+    "@xmldom/xmldom": "^0.9.11",
     "cross-env": "10.1.0",
     "playwright": "1.62.1",
+    "tar": "^7.5.22",
     "yaml": "2.9.0"
   },
   "dependencies": {

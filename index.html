@@ -29,7 +29,7 @@
           </label>
           <label class="control search-control">
             <span>搜索</span>
-            <input id="searchInput" type="search" spellcheck="false" placeholder="地址 / 名称 / 字段">
+            <input id="searchInput" type="search" spellcheck="false" placeholder="地址 / 编码 / 名称 / 字段">
           </label>
           <button id="loadYamlButton" class="tool-button" type="button" title="导入 YAML">
             <i data-lucide="file-plus-2"></i><span>导入 YAML</span>
@@ -100,7 +100,7 @@
         <section id="matrixView" class="view-section">
           <div class="section-head">
             <div>
-              <h2>地址矩阵</h2>
+              <h2 id="matrixTitle">地址矩阵</h2>
               <p id="matrixSummary"></p>
             </div>
             <div class="legend">
@@ -115,16 +115,22 @@
 
         <section id="tableView" class="view-section hidden">
           <div class="section-head">
-            <div>
-              <h2>传统视图</h2>
-              <p id="tableSummary"></p>
+            <div class="table-section-heading">
+              <button id="systemOverviewBackButton" class="system-overview-back" type="button"
+                aria-label="返回全局预览" title="返回全局预览" hidden>
+                <i data-lucide="arrow-left"></i>
+              </button>
+              <div>
+                <h2>传统视图</h2>
+                <p id="tableSummary"></p>
+              </div>
             </div>
           </div>
           <div class="table-wrap">
             <table class="register-table">
               <thead>
                 <tr>
-                  <th>地址</th>
+                  <th id="registerLocatorHeader">地址</th>
                   <th>寄存器</th>
                   <th>属性</th>
                   <th>寄存器值</th>

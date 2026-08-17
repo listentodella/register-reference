@@ -76,6 +76,9 @@ jobs:
         if: runner.os != 'Linux'
         run: npx playwright install chromium webkit
 
+      - name: Test ARM register importers
+        run: npm run test:arm-import
+
       - name: Test web interface
         run: npm run test:web
 

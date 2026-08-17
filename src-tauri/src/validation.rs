@@ -7,8 +7,14 @@ const TOP_KEYS: &[&str] = &[
     "vendor",
     "family",
     "device_type",
+    "register_space",
+    "source",
     "who_am_i",
     "pages",
+];
+const REGISTER_SPACE_KEYS: &[&str] = &["kind", "architecture", "profile"];
+const SOURCE_KEYS: &[&str] = &[
+    "title", "version", "revision", "document", "url", "license", "notice",
 ];
 const WHO_KEYS: &[&str] = &["reg", "values"];
 const WHO_VALUE_KEYS: &[&str] = &["value", "desc"];
@@ -40,6 +46,14 @@ const REGISTER_KEYS: &[&str] = &[
     "target",
     "action_hint",
     "ignore_by_default",
+    "encoding",
+    "accessors",
+    "execution_state",
+    "condition",
+    "groups",
+    "aliases",
+    "variables",
+    "source_ref",
 ];
 const FIELD_KEYS: &[&str] = &[
     "name",
@@ -53,6 +67,28 @@ const FIELD_KEYS: &[&str] = &[
     "target",
     "action_hint",
     "ignore_by_default",
+    "condition",
+    "reserved",
+    "reset_info",
+    "access_rules",
+    "variable_length",
+];
+const ENCODING_KEYS: &[&str] = &[
+    "scheme", "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1",
+    "reg", "selector",
+];
+const ACCESSOR_KEYS: &[&str] = &["name", "kind", "instruction", "condition", "encoding"];
+const VARIABLE_KEYS: &[&str] = &["name", "min", "max", "values"];
+const ACCESS_RULE_KEYS: &[&str] = &["access", "condition"];
+const ENUM_VALUE_KEYS: &[&str] = &["value", "desc", "name", "condition"];
+const SYSTEM_ENCODING_SCHEMES: &[&str] = &[
+    "aarch64_sysreg",
+    "aarch64_special",
+    "aarch32_cp15",
+    "aarch32_coproc",
+    "aarch32_special",
+    "aarch32_vfp",
+    "m_profile_special",
 ];
 
 #[derive(Default)]
@@ -179,12 +215,12 @@ fn warn_unknown_keys(
     }
 }
 
-fn parse_integer(value: &Value) -> Option<i128> {
+fn parse_integer(value: &Value) -> Option<(bool, u128)> {
     if let Some(number) = value.as_i64() {
-        return Some(i128::from(number));
+        return Some((number.is_negative(), u128::from(number.unsigned_abs())));
     }
     if let Some(number) = value.as_u64() {
-        return Some(i128::from(number));
+        return Some((false, u128::from(number)));
     }
     let text = value.as_str()?.trim();
     let (negative, digits) = text
@@ -201,12 +237,16 @@ fn parse_integer(value: &Value) -> Option<i128> {
     } else {
         (10, digits)
     };
-    let number = i128::from_str_radix(digits, radix).ok()?;
-    Some(if negative { -number } else { number })
+    let number = u128::from_str_radix(digits, radix).ok()?;
+    Some((negative, number))
 }
 
-fn fits_unsigned(value: u64, bit_width: u64) -> bool {
-    bit_width >= 64 || value < (1_u64 << bit_width)
+fn parse_unsigned_integer(value: &Value) -> Option<u128> {
+    parse_integer(value).and_then(|(negative, number)| (!negative).then_some(number))
+}
+
+fn fits_unsigned(value: u128, bit_width: u64) -> bool {
+    bit_width >= 128 || value < (1_u128 << bit_width)
 }
 
 fn validate_enum_value(
@@ -214,18 +254,60 @@ fn validate_enum_value(
     value: &Value,
     bit_width: u64,
     location: &str,
-) -> Option<i128> {
-    let Some(parsed) = parse_integer(value) else {
-        validator.error(location, "枚举值必须是整数或带 0x/0b 前缀的数字字符串");
-        return None;
-    };
-    if parsed < 0 || (bit_width < 127 && parsed >= (1_i128 << bit_width)) {
-        validator.error(
-            location,
-            format!("枚举值 {value:?} 超出 {bit_width} bit 范围"),
-        );
+) -> Option<String> {
+    if let Some((negative, parsed)) = parse_integer(value) {
+        if negative || !fits_unsigned(parsed, bit_width) {
+            validator.error(
+                location,
+                format!("枚举值 {value:?} 超出 {bit_width} bit 范围"),
+            );
+        }
+        return Some(format!("exact:{}{parsed}", if negative { "-" } else { "" }));
     }
-    Some(parsed)
+    if let Some(text) = value.as_str().map(str::trim) {
+        if let Some(pattern) = text
+            .strip_prefix("0b")
+            .or_else(|| text.strip_prefix("0B"))
+            .filter(|pattern| {
+                pattern
+                    .chars()
+                    .all(|character| matches!(character, '0' | '1' | 'x' | 'X'))
+                    && pattern
+                        .chars()
+                        .any(|character| matches!(character, 'x' | 'X'))
+            })
+        {
+            if pattern.len() as u64 > bit_width {
+                validator.error(
+                    location,
+                    format!("枚举模式 {value:?} 超出 {bit_width} bit 范围"),
+                );
+            }
+            return Some(format!("pattern:{}", pattern.to_ascii_lowercase()));
+        }
+        if let Some((from, to)) = text.split_once("..") {
+            let from_value = parse_unsigned_integer(&Value::String(from.trim().to_owned()));
+            let to_value = parse_unsigned_integer(&Value::String(to.trim().to_owned()));
+            if let (Some(from_value), Some(to_value)) = (from_value, to_value) {
+                if from_value <= to_value {
+                    if !fits_unsigned(to_value, bit_width) {
+                        validator.error(
+                            location,
+                            format!("枚举值 {value:?} 超出 {bit_width} bit 范围"),
+                        );
+                    }
+                    return Some(format!("range:{from_value}:{to_value}"));
+                }
+            }
+            validator.error(location, "枚举区间必须是由 .. 连接的递增非负整数");
+            return None;
+        }
+    }
+    validator.error(
+        location,
+        "枚举值必须是整数、数字字符串、二进制通配模式或数值区间",
+    );
+    None
 }
 
 fn validate_values(validator: &mut Validator, value: &Value, bit_width: u64, location: &str) {
@@ -247,6 +329,7 @@ fn validate_values(validator: &mut Validator, value: &Value, bit_width: u64, loc
         let Some(item) = require_mapping(validator, Some(item), &item_location) else {
             continue;
         };
+        warn_unknown_keys(validator, item, ENUM_VALUE_KEYS, &item_location);
         match get(item, "value") {
             Some(value) => {
                 if let Some(parsed) = validate_enum_value(
@@ -277,19 +360,237 @@ fn validate_values(validator: &mut Validator, value: &Value, bit_width: u64, loc
         } else {
             validator.error(&item_location, "缺少 desc 或 name");
         }
+        if get(item, "condition").is_some() {
+            require_string(
+                validator,
+                get(item, "condition"),
+                &format!("{item_location}.condition"),
+            );
+        }
     }
 }
 
-fn parse_bit_range(value: &str) -> Option<(u64, u64)> {
-    let mut parts = value.trim().split(':');
-    let hi = parts.next()?.parse::<u64>().ok()?;
-    let lo = parts
-        .next()
-        .map_or(Some(hi), |part| part.parse::<u64>().ok())?;
-    if parts.next().is_some() {
+fn parse_bit_ranges(
+    validator: &mut Validator,
+    value: Option<&Value>,
+    register_bit_width: u64,
+    location: &str,
+) -> Option<Vec<(u64, u64)>> {
+    let Some(value) = value.and_then(Value::as_str) else {
+        validator.error(
+            location,
+            "必须是带引号的字符串，例如 \"7:0\" 或 \"87:80,47:5\"",
+        );
         return None;
+    };
+    let mut ranges = Vec::new();
+    for token in value.split(',') {
+        let mut parts = token.trim().split(':');
+        let Some(hi) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+            validator.error(
+                location,
+                "格式必须是 hi:lo、单个 bit，或由逗号分隔的多个范围",
+            );
+            return None;
+        };
+        let Some(lo) = parts
+            .next()
+            .map_or(Some(hi), |part| part.parse::<u64>().ok())
+        else {
+            validator.error(
+                location,
+                "格式必须是 hi:lo、单个 bit，或由逗号分隔的多个范围",
+            );
+            return None;
+        };
+        if parts.next().is_some() {
+            validator.error(
+                location,
+                "格式必须是 hi:lo、单个 bit，或由逗号分隔的多个范围",
+            );
+            return None;
+        }
+        if hi < lo {
+            validator.error(location, "最高位 hi 不能小于最低位 lo");
+            return None;
+        }
+        if hi >= register_bit_width {
+            validator.error(
+                location,
+                format!("bit {hi} 超出寄存器有效位宽 {register_bit_width}"),
+            );
+            return None;
+        }
+        if ranges
+            .iter()
+            .any(|(other_hi, other_lo)| lo.max(*other_lo) <= hi.min(*other_hi))
+        {
+            validator.error(location, "同一位域的多个 bit 范围不能互相重叠");
+            return None;
+        }
+        ranges.push((hi, lo));
     }
-    Some((hi, lo))
+    (!ranges.is_empty()).then_some(ranges)
+}
+
+fn validate_encoding(validator: &mut Validator, value: Option<&Value>, location: &str) {
+    let Some(encoding) = require_mapping(validator, value, location) else {
+        return;
+    };
+    warn_unknown_keys(validator, encoding, ENCODING_KEYS, location);
+    if get(encoding, "scheme")
+        .and_then(Value::as_str)
+        .is_none_or(|scheme| !SYSTEM_ENCODING_SCHEMES.contains(&scheme))
+    {
+        validator.error(
+            &format!("{location}.scheme"),
+            format!("必须是 {} 之一", SYSTEM_ENCODING_SCHEMES.join("、")),
+        );
+    }
+    let mut field_count = 0;
+    for (field_key, field_value) in encoding {
+        if field_key.as_str() == Some("scheme") {
+            continue;
+        }
+        field_count += 1;
+        let valid_integer = as_nonnegative_integer(field_value).is_some();
+        let valid_expression = field_value
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty());
+        if !valid_integer && !valid_expression {
+            validator.error(
+                &format!("{location}.{}", field_key.as_str().unwrap_or("?")),
+                "必须是非负整数或非空编码表达式",
+            );
+        }
+    }
+    if field_count == 0 {
+        validator.error(location, "至少需要一个编码字段");
+    }
+}
+
+fn validate_accessors(validator: &mut Validator, value: Option<&Value>, location: &str) {
+    let Some(accessors) = require_sequence(validator, value, location) else {
+        return;
+    };
+    if accessors.is_empty() {
+        validator.error(location, "至少需要一个访问方式");
+    }
+    for (index, item) in accessors.iter().enumerate() {
+        let item_location = format!("{location}[{index}]");
+        let Some(accessor) = require_mapping(validator, Some(item), &item_location) else {
+            continue;
+        };
+        warn_unknown_keys(validator, accessor, ACCESSOR_KEYS, &item_location);
+        require_string(
+            validator,
+            get(accessor, "name"),
+            &format!("{item_location}.name"),
+        );
+        if require_string(
+            validator,
+            get(accessor, "kind"),
+            &format!("{item_location}.kind"),
+        ) && !matches!(
+            get(accessor, "kind").and_then(Value::as_str),
+            Some("read" | "write" | "implicit")
+        ) {
+            validator.error(
+                &format!("{item_location}.kind"),
+                "必须是 read、write 或 implicit",
+            );
+        }
+        require_string(
+            validator,
+            get(accessor, "instruction"),
+            &format!("{item_location}.instruction"),
+        );
+        if get(accessor, "condition").is_some() {
+            require_string(
+                validator,
+                get(accessor, "condition"),
+                &format!("{item_location}.condition"),
+            );
+        }
+        validate_encoding(
+            validator,
+            get(accessor, "encoding"),
+            &format!("{item_location}.encoding"),
+        );
+    }
+}
+
+fn validate_variables(validator: &mut Validator, value: &Value, location: &str) {
+    let Some(variables) = require_sequence(validator, Some(value), location) else {
+        return;
+    };
+    for (index, item) in variables.iter().enumerate() {
+        let item_location = format!("{location}[{index}]");
+        let Some(variable) = require_mapping(validator, Some(item), &item_location) else {
+            continue;
+        };
+        warn_unknown_keys(validator, variable, VARIABLE_KEYS, &item_location);
+        require_string(
+            validator,
+            get(variable, "name"),
+            &format!("{item_location}.name"),
+        );
+        for bound in ["min", "max"] {
+            if get(variable, bound)
+                .is_some_and(|item| item.as_i64().is_none() && item.as_u64().is_none())
+            {
+                validator.error(&format!("{item_location}.{bound}"), "必须是整数");
+            }
+        }
+        if let Some(values) = get(variable, "values") {
+            if let Some(values) =
+                require_sequence(validator, Some(values), &format!("{item_location}.values"))
+            {
+                for (value_index, item) in values.iter().enumerate() {
+                    let valid = item.as_i64().is_some()
+                        || item.as_u64().is_some()
+                        || item.as_str().is_some_and(|text| !text.trim().is_empty());
+                    if !valid {
+                        validator.error(
+                            &format!("{item_location}.values[{value_index}]"),
+                            "必须是整数或非空字符串",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_access_rules(validator: &mut Validator, value: &Value, location: &str) {
+    let Some(rules) = require_sequence(validator, Some(value), location) else {
+        return;
+    };
+    for (index, item) in rules.iter().enumerate() {
+        let item_location = format!("{location}[{index}]");
+        let Some(rule) = require_mapping(validator, Some(item), &item_location) else {
+            continue;
+        };
+        warn_unknown_keys(validator, rule, ACCESS_RULE_KEYS, &item_location);
+        require_string(
+            validator,
+            get(rule, "access"),
+            &format!("{item_location}.access"),
+        );
+        if get(rule, "condition").is_some() {
+            require_string(
+                validator,
+                get(rule, "condition"),
+                &format!("{item_location}.condition"),
+            );
+        }
+    }
+}
+
+struct FieldInfo {
+    ranges: Vec<(u64, u64)>,
+    reset: Option<u128>,
+    condition: String,
 }
 
 fn validate_field(
@@ -297,32 +598,19 @@ fn validate_field(
     value: &Value,
     register_bit_width: u64,
     location: &str,
-) -> Option<(u64, u64, Option<u64>)> {
+) -> Option<FieldInfo> {
     let field = require_mapping(validator, Some(value), location)?;
     warn_unknown_keys(validator, field, FIELD_KEYS, location);
     require_string(validator, get(field, "name"), &format!("{location}.name"));
     require_string(validator, get(field, "desc"), &format!("{location}.desc"));
 
     let bits_location = format!("{location}.bits");
-    let Some(bits) = get(field, "bits").and_then(Value::as_str) else {
-        validator.error(&bits_location, "必须是带引号的字符串，例如 \"7:0\"");
-        return None;
-    };
-    let Some((hi, lo)) = parse_bit_range(bits) else {
-        validator.error(&bits_location, "格式必须是 hi:lo 或单个 bit");
-        return None;
-    };
-    if hi < lo {
-        validator.error(&bits_location, "最高位 hi 不能小于最低位 lo");
-        return None;
-    }
-    if hi >= register_bit_width {
-        validator.error(
-            &bits_location,
-            format!("bit {hi} 超出寄存器有效位宽 {register_bit_width}"),
-        );
-        return None;
-    }
+    let ranges = parse_bit_ranges(
+        validator,
+        get(field, "bits"),
+        register_bit_width,
+        &bits_location,
+    )?;
 
     if get(field, "access").is_some() {
         require_string(
@@ -331,8 +619,35 @@ fn validate_field(
             &format!("{location}.access"),
         );
     }
-    let field_width = hi - lo + 1;
-    let reset = get(field, "reset").and_then(as_nonnegative_integer);
+    if get(field, "condition").is_some() {
+        require_string(
+            validator,
+            get(field, "condition"),
+            &format!("{location}.condition"),
+        );
+    }
+    if get(field, "reserved").is_some() {
+        require_string(
+            validator,
+            get(field, "reserved"),
+            &format!("{location}.reserved"),
+        );
+    }
+    if get(field, "reset_info").is_some() {
+        require_string(
+            validator,
+            get(field, "reset_info"),
+            &format!("{location}.reset_info"),
+        );
+    }
+    if get(field, "variable_length").is_some_and(|value| !value.is_bool()) {
+        validator.error(&format!("{location}.variable_length"), "必须是布尔值");
+    }
+    if let Some(access_rules) = get(field, "access_rules") {
+        validate_access_rules(validator, access_rules, &format!("{location}.access_rules"));
+    }
+    let field_width: u64 = ranges.iter().map(|(hi, lo)| hi - lo + 1).sum();
+    let reset = get(field, "reset").and_then(parse_unsigned_integer);
     if get(field, "reset").is_some()
         && (reset.is_none() || !fits_unsigned(reset.unwrap_or_default(), field_width))
     {
@@ -349,7 +664,15 @@ fn validate_field(
             &format!("{location}.values"),
         );
     }
-    Some((hi, lo, reset))
+    Some(FieldInfo {
+        ranges,
+        reset,
+        condition: get(field, "condition")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    })
 }
 
 #[derive(Clone)]
@@ -360,18 +683,91 @@ struct RegisterInfo {
     location: String,
 }
 
+struct FieldInfoWithLocation {
+    ranges: Vec<(u64, u64)>,
+    condition: String,
+    location: String,
+}
+
 fn validate_register(
     validator: &mut Validator,
     value: &Value,
     page_name: &str,
     index: usize,
+    is_system: bool,
+    allows_system_mmio: bool,
 ) -> Option<(RegisterInfo, String)> {
     let location = format!("pages.{page_name}.registers[{index}]");
     let register = require_mapping(validator, Some(value), &location)?;
     warn_unknown_keys(validator, register, REGISTER_KEYS, &location);
 
     let address = get(register, "addr").and_then(as_nonnegative_integer);
-    if address.is_none() {
+    let is_system_mmio = is_system && allows_system_mmio && address.is_some();
+    if is_system {
+        if get(register, "addr").is_some() && !allows_system_mmio {
+            validator.error(
+                &format!("{location}.addr"),
+                "A-profile arm_system 寄存器不能使用 MMIO 地址",
+            );
+        }
+        if get(register, "addr").is_some() && allows_system_mmio && !is_system_mmio {
+            validator.error(
+                &format!("{location}.addr"),
+                "M-profile MMIO 地址必须是非负整数",
+            );
+        }
+        if !is_system_mmio {
+            validate_encoding(
+                validator,
+                get(register, "encoding"),
+                &format!("{location}.encoding"),
+            );
+            validate_accessors(
+                validator,
+                get(register, "accessors"),
+                &format!("{location}.accessors"),
+            );
+        }
+        if get(register, "execution_state").is_some() {
+            require_string(
+                validator,
+                get(register, "execution_state"),
+                &format!("{location}.execution_state"),
+            );
+        }
+        if get(register, "condition").is_some() {
+            require_string(
+                validator,
+                get(register, "condition"),
+                &format!("{location}.condition"),
+            );
+        }
+        for list_key in ["groups", "aliases"] {
+            if let Some(values) = get(register, list_key) {
+                if let Some(values) =
+                    require_sequence(validator, Some(values), &format!("{location}.{list_key}"))
+                {
+                    for (value_index, item) in values.iter().enumerate() {
+                        require_string(
+                            validator,
+                            Some(item),
+                            &format!("{location}.{list_key}[{value_index}]"),
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(variables) = get(register, "variables") {
+            validate_variables(validator, variables, &format!("{location}.variables"));
+        }
+        if get(register, "source_ref").is_some() {
+            require_string(
+                validator,
+                get(register, "source_ref"),
+                &format!("{location}.source_ref"),
+            );
+        }
+    } else if address.is_none() {
         validator.error(&format!("{location}.addr"), "必须是非负整数");
     }
     let name = get(register, "name")
@@ -439,66 +835,112 @@ fn validate_register(
         },
         None => width,
     };
+    if is_system && !is_system_mmio && get(register, "address_span").is_some() {
+        validator.error(
+            &format!("{location}.address_span"),
+            "非 MMIO arm_system 寄存器不能声明地址跨度",
+        );
+    }
 
+    if is_system && !is_system_mmio && get(register, "byte_order").is_some() {
+        validator.error(
+            &format!("{location}.byte_order"),
+            "非 MMIO arm_system 寄存器不能声明字节序",
+        );
+    }
     if let Some(byte_order) = get(register, "byte_order") {
         if !matches!(byte_order.as_str(), Some("little" | "big")) {
             validator.error(&format!("{location}.byte_order"), "必须是 little 或 big");
         }
     }
-    let register_reset = get(register, "reset").and_then(as_nonnegative_integer);
-    if let Some(reset) = get(register, "reset") {
-        if register_reset.is_none() || !fits_unsigned(register_reset.unwrap_or_default(), bit_width)
-        {
-            validator.error(
-                &format!("{location}.reset"),
-                format!("必须是 {bit_width} bit 范围内的非负整数"),
-            );
-        } else if reset.is_string() {
-            validator.error(&format!("{location}.reset"), "必须是整数，不能使用字符串");
-        }
+    let register_reset = get(register, "reset").and_then(parse_unsigned_integer);
+    if get(register, "reset").is_some()
+        && (register_reset.is_none()
+            || !fits_unsigned(register_reset.unwrap_or_default(), bit_width))
+    {
+        validator.error(
+            &format!("{location}.reset"),
+            format!("必须是 {bit_width} bit 范围内的非负整数"),
+        );
     }
 
     if let Some(fields_value) = get(register, "fields") {
         if let Some(fields) =
             require_sequence(validator, Some(fields_value), &format!("{location}.fields"))
         {
-            let mut ranges: Vec<(u64, u64, String)> = Vec::new();
+            let mut ranges: Vec<FieldInfoWithLocation> = Vec::new();
             let mut names = HashSet::new();
-            let mut reset_mask = 0_u64;
-            let mut reset_value = 0_u64;
+            let mut reset_mask = 0_u128;
+            let mut reset_value = 0_u128;
             for (field_index, field_value) in fields.iter().enumerate() {
                 let field_location = format!("{location}.fields[{field_index}]");
                 let field_name = field_value
                     .as_mapping()
                     .and_then(|field| get(field, "name"))
                     .and_then(Value::as_str);
-                if let Some(field_name) = field_name {
-                    if !names.insert(field_name.to_owned()) {
+                let is_reserved = field_value
+                    .as_mapping()
+                    .is_some_and(|field| get(field, "reserved").is_some());
+                if let Some(field_name) = field_name
+                    .filter(|name| !is_reserved && !name.to_ascii_uppercase().starts_with("RES"))
+                {
+                    let condition = field_value
+                        .as_mapping()
+                        .and_then(|field| get(field, "condition"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim();
+                    let name_key = format!("{field_name}\0{condition}");
+                    if !names.insert(name_key) {
                         validator.warn(
                             &field_location,
-                            format!("位域名 {field_name:?} 在同一寄存器内重复"),
+                            format!("位域名 {field_name:?} 在相同条件下重复"),
                         );
                     }
                 }
-                if let Some((hi, lo, field_reset)) =
+                if let Some(field_info) =
                     validate_field(validator, field_value, bit_width, &field_location)
                 {
-                    for (other_hi, other_lo, other_location) in &ranges {
-                        if lo.max(*other_lo) <= hi.min(*other_hi) {
+                    for other in &ranges {
+                        let overlaps = field_info.ranges.iter().any(|(hi, lo)| {
+                            other
+                                .ranges
+                                .iter()
+                                .any(|(other_hi, other_lo)| *lo.max(other_lo) <= *hi.min(other_hi))
+                        });
+                        if overlaps && field_info.condition.is_empty() && other.condition.is_empty()
+                        {
                             validator
-                                .warn(&field_location, format!("位域与 {other_location} 重叠"));
+                                .warn(&field_location, format!("位域与 {} 重叠", other.location));
                         }
                     }
-                    ranges.push((hi, lo, field_location));
-                    if let Some(field_reset) = field_reset.filter(|_| hi < 64) {
-                        let field_width = hi - lo + 1;
-                        let mask = if field_width == 64 {
-                            u64::MAX
-                        } else {
-                            ((1_u64 << field_width) - 1) << lo
-                        };
-                        reset_mask |= mask;
-                        reset_value = (reset_value & !mask) | (field_reset << lo);
+                    ranges.push(FieldInfoWithLocation {
+                        ranges: field_info.ranges.clone(),
+                        condition: field_info.condition.clone(),
+                        location: field_location,
+                    });
+                    if let Some(field_reset) = field_info.reset {
+                        let mut remaining = field_reset;
+                        for (hi, lo) in field_info.ranges.iter().rev() {
+                            let field_width = hi - lo + 1;
+                            if *lo >= 128 || field_width > 128 - *lo {
+                                remaining = 0;
+                                continue;
+                            }
+                            let value_mask = if field_width == 128 {
+                                u128::MAX
+                            } else {
+                                (1_u128 << field_width) - 1
+                            };
+                            let mask = value_mask << lo;
+                            reset_mask |= mask;
+                            reset_value = (reset_value & !mask) | ((remaining & value_mask) << lo);
+                            remaining = if field_width == 128 {
+                                0
+                            } else {
+                                remaining >> field_width
+                            };
+                        }
                     }
                 }
             }
@@ -514,6 +956,17 @@ fn validate_register(
         }
     }
 
+    if is_system {
+        return Some((
+            RegisterInfo {
+                start: 0,
+                end: 0,
+                has_alias_note: get(register, "alias_note").is_some(),
+                location,
+            },
+            name,
+        ));
+    }
     let start = address?;
     let Some(end) = start.checked_add(address_span - 1) else {
         validator.error(&format!("{location}.address_span"), "地址范围溢出");
@@ -724,8 +1177,78 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
         }
     }
 
+    let mut register_space_kind = "mmio";
+    if let Some(register_space) = get(root, "register_space") {
+        if let Some(register_space) =
+            require_mapping(&mut validator, Some(register_space), "register_space")
+        {
+            warn_unknown_keys(
+                &mut validator,
+                register_space,
+                REGISTER_SPACE_KEYS,
+                "register_space",
+            );
+            if require_string(
+                &mut validator,
+                get(register_space, "kind"),
+                "register_space.kind",
+            ) {
+                match get(register_space, "kind").and_then(Value::as_str) {
+                    Some("mmio") => register_space_kind = "mmio",
+                    Some("arm_system") => register_space_kind = "arm_system",
+                    _ => validator.error("register_space.kind", "必须是 mmio 或 arm_system"),
+                }
+            }
+            for key in ["architecture", "profile"] {
+                if get(register_space, key).is_some() {
+                    require_string(
+                        &mut validator,
+                        get(register_space, key),
+                        &format!("register_space.{key}"),
+                    );
+                }
+            }
+        }
+    }
+    let is_system = register_space_kind == "arm_system";
+    let allows_system_mmio = is_system
+        && get(root, "register_space")
+            .and_then(Value::as_mapping)
+            .and_then(|space| get(space, "profile"))
+            .and_then(Value::as_str)
+            == Some("M");
+    if is_system
+        && get(root, "schema_version")
+            .and_then(as_nonnegative_integer)
+            .is_none_or(|version| version < 2)
+    {
+        validator.error(
+            "schema_version",
+            "arm_system 需要 schema_version: 2 或更高版本",
+        );
+    }
+    if let Some(source) = get(root, "source") {
+        if let Some(source) = require_mapping(&mut validator, Some(source), "source") {
+            warn_unknown_keys(&mut validator, source, SOURCE_KEYS, "source");
+            for (key, value) in source {
+                require_string(
+                    &mut validator,
+                    Some(value),
+                    &format!("source.{}", key.as_str().unwrap_or("?")),
+                );
+            }
+        }
+    } else if is_system {
+        validator.error("source", "arm_system 数据必须记录官方来源和版本");
+    }
+
     let who_register = match get(root, "who_am_i") {
+        Some(_value) if is_system => {
+            validator.error("who_am_i", "arm_system 数据不使用 MMIO WHO_AM_I");
+            None
+        }
         Some(value) => validate_who_am_i(&mut validator, value),
+        None if is_system => None,
         None => {
             validator.warn(
                 "root",
@@ -755,16 +1278,25 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
             continue;
         };
         warn_unknown_keys(&mut validator, page, PAGE_KEYS, &page_location);
-        match get(page, "page_id").and_then(as_nonnegative_integer) {
-            Some(page_id) => {
-                if let Some(previous_page) = page_ids.insert(page_id, page_name.to_owned()) {
-                    validator.warn(
-                        &format!("{page_location}.page_id"),
-                        format!("与页面 {previous_page:?} 使用相同 page_id"),
-                    );
+        if is_system && get(page, "page_id").is_some() {
+            validator.error(
+                &format!("{page_location}.page_id"),
+                "arm_system 分类页不能使用 MMIO page_id",
+            );
+        } else if is_system {
+            // System-register pages are named categories, not address pages.
+        } else {
+            match get(page, "page_id").and_then(as_nonnegative_integer) {
+                Some(page_id) => {
+                    if let Some(previous_page) = page_ids.insert(page_id, page_name.to_owned()) {
+                        validator.warn(
+                            &format!("{page_location}.page_id"),
+                            format!("与页面 {previous_page:?} 使用相同 page_id"),
+                        );
+                    }
                 }
+                None => validator.error(&format!("{page_location}.page_id"), "必须是非负整数"),
             }
-            None => validator.error(&format!("{page_location}.page_id"), "必须是非负整数"),
         }
         require_string(
             &mut validator,
@@ -796,9 +1328,14 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
         let mut names = HashSet::new();
         let mut previous_address = None;
         for (index, register) in registers.iter().enumerate() {
-            let Some((register, name)) =
-                validate_register(&mut validator, register, page_name, index)
-            else {
+            let Some((register, name)) = validate_register(
+                &mut validator,
+                register,
+                page_name,
+                index,
+                is_system,
+                allows_system_mmio,
+            ) else {
                 continue;
             };
             if !name.is_empty() && !names.insert(name.clone()) {
@@ -806,6 +1343,9 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
                     &register.location,
                     format!("寄存器名 {name:?} 在页面内重复"),
                 );
+            }
+            if is_system {
+                continue;
             }
             let overlaps = page_registers
                 .iter()

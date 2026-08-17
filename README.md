@@ -6,6 +6,8 @@
 
 - `dwc3_rk3588.yaml`
 
+可公开复用的寄存器数据已独立维护在 [register-yaml-library](https://github.com/listentodella/register-yaml-library)，并按架构、控制器、接口和厂商分类。该仓库提供机器可读 `catalog.json`、来源许可说明和自动规范校验；本查看器仓库只保留适合作为离线默认示例的内置数据。
+
 `dwc3_rk3588.yaml` 只以 Rockchip 原始文档为寄存器事实来源：
 
 ```text
@@ -13,6 +15,28 @@ RK3588 TRM-Part2, Chapter 13 USB3 Controller
 ```
 
 生成脚本为 `tools/extract-dwc3-pdf.py`。它同时核对摘要表与详细位域表，并要求位域完整覆盖、位域复位值合成结果与寄存器复位值一致。
+
+## ARM 系统寄存器
+
+项目支持 schema v2 的非 MMIO `arm_system` 寄存器。A-profile 不必从 PDF 逐页生成：Arm 官方提供逐寄存器机器可读 XML，`tools/import-arm-mrs.mjs` 可直接读取官方 `.tar.gz` 或解压目录，生成可导入的 AArch64/AArch32 YAML。
+
+```bash
+npm run arm:import -- SysReg_xml_A_profile-2026-06_mc.tar.gz \
+  --output arm-aarch64-system-registers.yaml \
+  --state AArch64 \
+  --version 2026-06 \
+  --revision M.c
+```
+
+系统寄存器使用 MRS/MSR 或 MRC/MCR 结构化编码，不会伪装成 MMIO 地址。界面的九宫格入口会显示跨全部架构分类的紧凑全局预览；点击寄存器块会跳到对应分类的编码表格。当前模型支持条件重叠字段、非连续位域、通配枚举以及 128-bit 寄存器。来源、版本与 Arm 专有 notice 的处理详见 [docs/arm-system-registers.md](docs/arm-system-registers.md)。未确认 Arm 再分发条款前，不应把官方 XML 或生成的完整 ARM 数据包提交到仓库或 Release。
+
+Cortex-M 使用 Arm 官方 [CMSIS_6](https://github.com/ARM-software/CMSIS_6) 头文件导入器。`core_cm*.h` 与 `m-profile/cmsis_gcc_m.h` 提供 CPU 特殊寄存器和 SCS/CoreSight 的地址、访问属性与位域定义；[Cortex_DFP](https://github.com/ARM-software/Cortex_DFP) 中的通用 SVD 当前是示例/不完整设备描述，不作为完整寄存器事实来源。生成 M-profile 数据：
+
+```bash
+npm run arm:cmsis-import -- <CMSIS_6目录> --core cm33 --version 6.3.0 --output arm-cm33-system-registers.yaml
+```
+
+M-profile YAML 可以同时包含 `m_profile_special` 特殊寄存器和带真实 `addr` 的 SCS MMIO 条目。CMSIS_6 为 Apache-2.0，生成数据应保留 Arm 版权与许可证归属；完整 A-profile XML 仍按其专有 notice 单独处理。
 
 ## 使用
 
@@ -55,7 +79,7 @@ npm run build
 
 备注是保存在 SQLite 中的独立覆盖层，不会修改 YAML，也不会在重新导入或同步 YAML 时被覆盖。每个寄存器可以保存多条备注；矩阵显示备注标记，悬浮详情和传统表格显示正文，搜索也会匹配备注内容。
 
-备注通过芯片、页面、寄存器地址和名称定位，因此调整 YAML 中寄存器的排列顺序不会影响已有备注。独立 HTML 导出默认包含所选芯片的备注，也可以在芯片库中取消“包含备注”；分享版只读展示备注。
+MMIO 备注通过芯片、页面、寄存器地址和名称定位；系统寄存器备注通过结构化编码和名称定位。因此调整 YAML 中寄存器的排列顺序不会影响已有备注。独立 HTML 导出默认包含所选芯片的备注，也可以在芯片库中取消“包含备注”；分享版只读展示备注。
 
 ## 芯片附件
 
@@ -65,7 +89,7 @@ npm run build
 
 ## 界面主题
 
-工具内置“跟随系统、清晰亮色、石墨深色、高对比”四种主题。主题选择保存在浏览器或 WebView 的本地存储中，重新打开后继续生效；“跟随系统”会响应操作系统的明暗模式变化。主题只调整颜色令牌，不提供自定义背景图片，避免影响寄存器矩阵和位域信息的辨识。
+工具内置“跟随系统、清晰亮色、石墨深色、Rusty 锈钢、高对比”五种主题。主题选择保存在浏览器或 WebView 的本地存储中，重新打开后继续生效；“跟随系统”会响应操作系统的明暗模式变化。主题只调整颜色令牌，不提供自定义背景图片，避免影响寄存器矩阵和位域信息的辨识。
 
 主题结构参考了开源项目 [GitHub Primer Primitives](https://github.com/primer/primitives) 的语义颜色分层、[Catppuccin Palette](https://github.com/catppuccin/palette) 的完整状态色组织，以及 [Dracula Theme](https://github.com/dracula/dracula-theme) 的深色对比度实践。项目使用自己的配色和组件样式，并未引入这些项目的运行时依赖。
 
@@ -92,6 +116,7 @@ npm run build
 ```bash
 python3 .agents/skills/register-yaml-generator/scripts/validate_register_yaml.py --strict chip.yaml
 node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js chip.yaml
+npm run test:arm-import
 npm run data:build
 ```
 

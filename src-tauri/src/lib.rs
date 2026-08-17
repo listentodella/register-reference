@@ -43,7 +43,8 @@ struct RegisterNote {
     id: i64,
     chip_id: String,
     page_name: String,
-    register_addr: i64,
+    register_addr: Option<i64>,
+    register_key: String,
     register_name: String,
     kind: String,
     content: String,
@@ -57,7 +58,9 @@ struct RegisterNoteInput {
     note_id: Option<i64>,
     chip_id: String,
     page_name: String,
-    register_addr: i64,
+    register_addr: Option<i64>,
+    #[serde(default)]
+    register_key: String,
     register_name: String,
     kind: String,
     content: String,
@@ -132,6 +135,7 @@ fn initialize_database(path: &DatabasePath) -> Result<(), String> {
                 chip_id TEXT NOT NULL,
                 page_name TEXT NOT NULL,
                 register_addr INTEGER NOT NULL,
+                register_key TEXT NOT NULL DEFAULT '',
                 register_name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -153,6 +157,31 @@ fn initialize_database(path: &DatabasePath) -> Result<(), String> {
                 ON chip_attachments(chip_id, created_at DESC);",
         )
         .map_err(|error| format!("无法初始化芯片库：{error}"))?;
+
+    let has_register_key = connection
+        .prepare("PRAGMA table_info(register_notes)")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| format!("无法检查备注表结构：{error}"))?
+        .iter()
+        .any(|column| column == "register_key");
+    if !has_register_key {
+        connection
+            .execute(
+                "ALTER TABLE register_notes ADD COLUMN register_key TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|error| format!("无法升级备注表结构：{error}"))?;
+    }
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_register_notes_key ON register_notes(chip_id, page_name, register_key)",
+            [],
+        )
+        .map_err(|error| format!("无法创建备注编码索引：{error}"))?;
 
     for (id, source_name, yaml_text) in BUILTIN_CHIPS {
         let metadata = parse_metadata(yaml_text)?;
@@ -226,7 +255,9 @@ fn parse_metadata(yaml_text: &str) -> Result<ChipMetadata, String> {
 }
 
 fn default_category(metadata: &ChipMetadata) -> String {
-    if metadata.device_type == "usb_controller" {
+    if metadata.device_type == "architecture_registers" {
+        "架构寄存器".to_owned()
+    } else if metadata.device_type == "usb_controller" {
         "接口控制器".to_owned()
     } else {
         "传感器".to_owned()
@@ -436,13 +467,13 @@ fn query_register_notes(
     chip_id: Option<&str>,
 ) -> Result<Vec<RegisterNote>, String> {
     let query = if chip_id.is_some() {
-        "SELECT id, chip_id, page_name, register_addr, register_name, kind, content,
+        "SELECT id, chip_id, page_name, register_addr, register_key, register_name, kind, content,
                 created_at, updated_at
          FROM register_notes
          WHERE chip_id = ?1
          ORDER BY updated_at DESC, id DESC"
     } else {
-        "SELECT id, chip_id, page_name, register_addr, register_name, kind, content,
+        "SELECT id, chip_id, page_name, register_addr, register_key, register_name, kind, content,
                 created_at, updated_at
          FROM register_notes
          ORDER BY updated_at DESC, id DESC"
@@ -455,12 +486,15 @@ fn query_register_notes(
             id: row.get(0)?,
             chip_id: row.get(1)?,
             page_name: row.get(2)?,
-            register_addr: row.get(3)?,
-            register_name: row.get(4)?,
-            kind: row.get(5)?,
-            content: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            register_addr: row
+                .get::<_, i64>(3)
+                .map(|value| (value >= 0).then_some(value))?,
+            register_key: row.get(4)?,
+            register_name: row.get(5)?,
+            kind: row.get(6)?,
+            content: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         })
     };
     let notes = match chip_id {
@@ -477,10 +511,56 @@ fn query_register_notes(
     Ok(notes)
 }
 
+fn yaml_identity_scalar(value: &serde_yaml::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_i64().map(|value| value.to_string()))
+        .or_else(|| value.as_u64().map(|value| value.to_string()))
+}
+
+fn yaml_register_identity(register: &serde_yaml::Mapping) -> Option<String> {
+    let name = register
+        .get(serde_yaml::Value::String("name".to_owned()))
+        .and_then(serde_yaml::Value::as_str)?;
+    if let Some(encoding) = register
+        .get(serde_yaml::Value::String("encoding".to_owned()))
+        .and_then(serde_yaml::Value::as_mapping)
+    {
+        let scheme = encoding
+            .get(serde_yaml::Value::String("scheme".to_owned()))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or("arm_system");
+        let values = [
+            "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1",
+            "reg", "selector",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            encoding
+                .get(serde_yaml::Value::String(key.to_owned()))
+                .and_then(yaml_identity_scalar)
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+        return Some(format!("{scheme}:{values}:{name}"));
+    }
+    let address = register
+        .get(serde_yaml::Value::String("addr".to_owned()))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| number.try_into().ok()))
+        })?;
+    Some(format!("mmio:{address}:{name}"))
+}
+
 fn yaml_contains_register(
     yaml_text: &str,
     page_name: &str,
-    register_addr: i64,
+    register_addr: Option<i64>,
+    register_key: &str,
     register_name: &str,
 ) -> bool {
     let Ok(document) = serde_yaml::from_str::<serde_yaml::Value>(yaml_text) else {
@@ -509,7 +589,11 @@ fn yaml_contains_register(
                 let name = register
                     .get(serde_yaml::Value::String("name".to_owned()))
                     .and_then(serde_yaml::Value::as_str);
-                address == Some(register_addr) && name == Some(register_name)
+                let address_matches =
+                    register_addr.is_none_or(|expected| address == Some(expected));
+                let key_matches = register_key.is_empty()
+                    || yaml_register_identity(register).as_deref() == Some(register_key);
+                address_matches && key_matches && name == Some(register_name)
             })
         })
 }
@@ -521,13 +605,17 @@ fn upsert_register_note(
     let chip_id = input.chip_id.trim();
     let page_name = input.page_name.trim();
     let register_name = input.register_name.trim();
+    let register_key = input.register_key.trim();
     let kind = input.kind.trim();
     let content = input.content.trim();
     if chip_id.is_empty() || page_name.is_empty() || register_name.is_empty() {
         return Err("备注缺少芯片、页面或寄存器定位信息".to_owned());
     }
-    if input.register_addr < 0 {
+    if input.register_addr.is_some_and(|address| address < 0) {
         return Err("寄存器地址不能为负数".to_owned());
+    }
+    if input.register_addr.is_none() && register_key.is_empty() {
+        return Err("系统寄存器备注缺少稳定编码定位信息".to_owned());
     }
     if !matches!(kind, "note" | "warning" | "todo") {
         return Err("备注类型必须是 note、warning 或 todo".to_owned());
@@ -549,7 +637,13 @@ fn upsert_register_note(
     let Some(yaml_text) = yaml_text else {
         return Err("备注所属芯片不存在".to_owned());
     };
-    if !yaml_contains_register(&yaml_text, page_name, input.register_addr, register_name) {
+    if !yaml_contains_register(
+        &yaml_text,
+        page_name,
+        input.register_addr,
+        register_key,
+        register_name,
+    ) {
         return Err("目标寄存器不存在；芯片 YAML 可能已经更新".to_owned());
     }
 
@@ -559,14 +653,16 @@ fn upsert_register_note(
                 "UPDATE register_notes SET
                     page_name = ?1,
                     register_addr = ?2,
-                    register_name = ?3,
-                    kind = ?4,
-                    content = ?5,
+                    register_key = ?3,
+                    register_name = ?4,
+                    kind = ?5,
+                    content = ?6,
                     updated_at = CURRENT_TIMESTAMP
-                 WHERE id = ?6 AND chip_id = ?7",
+                 WHERE id = ?7 AND chip_id = ?8",
                 params![
                     page_name,
-                    input.register_addr,
+                    input.register_addr.unwrap_or(-1),
+                    register_key,
                     register_name,
                     kind,
                     content,
@@ -582,12 +678,13 @@ fn upsert_register_note(
         connection
             .execute(
                 "INSERT INTO register_notes (
-                    chip_id, page_name, register_addr, register_name, kind, content
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    chip_id, page_name, register_addr, register_key, register_name, kind, content
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     chip_id,
                     page_name,
-                    input.register_addr,
+                    input.register_addr.unwrap_or(-1),
+                    register_key,
                     register_name,
                     kind,
                     content
@@ -1223,7 +1320,8 @@ mod tests {
                 note_id: None,
                 chip_id: "builtin:dwc3-rk3588".to_owned(),
                 page_name: "MMIO".to_owned(),
-                register_addr: 0xC100,
+                register_addr: Some(0xC100),
+                register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
                 register_name: "USB3OTG_GSBUSCFG0".to_owned(),
                 kind: "warning".to_owned(),
                 content: "导出备注测试".to_owned(),
@@ -1260,7 +1358,8 @@ mod tests {
                 note_id: None,
                 chip_id: "builtin:dwc3-rk3588".to_owned(),
                 page_name: "MMIO".to_owned(),
-                register_addr: 0xC100,
+                register_addr: Some(0xC100),
+                register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
                 register_name: "USB3OTG_GSBUSCFG0".to_owned(),
                 kind: "note".to_owned(),
                 content: "先设置量程".to_owned(),
@@ -1276,7 +1375,8 @@ mod tests {
                 note_id: Some(notes[0].id),
                 chip_id: "builtin:dwc3-rk3588".to_owned(),
                 page_name: "MMIO".to_owned(),
-                register_addr: 0xC100,
+                register_addr: Some(0xC100),
+                register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
                 register_name: "USB3OTG_GSBUSCFG0".to_owned(),
                 kind: "warning".to_owned(),
                 content: "切换量程后等待数据稳定".to_owned(),
@@ -1291,6 +1391,279 @@ mod tests {
             remove_register_note(&connection, "builtin:dwc3-rk3588", notes[0].id)
                 .unwrap()
                 .is_empty()
+        );
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn stores_system_register_notes_by_encoding_identity() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let yaml = r#"schema_version: 2
+sensor: "ARM_TEST"
+vendor: "Arm"
+family: "A-profile"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Synthetic test"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Control:
+    access: "MRS / MSR"
+    desc: "Synthetic system-register category"
+    registers:
+      - name: "SCTLR_EL1"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Synthetic system register"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 1
+          crm: 0
+          op2: 0
+        accessors:
+          - name: "SCTLR_EL1"
+            kind: "read"
+            instruction: "MRS <Xt>, SCTLR_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 0
+              op2: 0
+"#;
+        let chip_id = upsert_imported_chip(&connection, yaml, "arm-test.yaml", None, None).unwrap();
+        let register_key = "aarch64_sysreg:op0=3:op1=0:crn=1:crm=0:op2=0:SCTLR_EL1";
+        let notes = upsert_register_note(
+            &connection,
+            &RegisterNoteInput {
+                note_id: None,
+                chip_id: chip_id.clone(),
+                page_name: "Control".to_owned(),
+                register_addr: None,
+                register_key: register_key.to_owned(),
+                register_name: "SCTLR_EL1".to_owned(),
+                kind: "warning".to_owned(),
+                content: "Check feature-dependent fields".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].register_addr, None);
+        assert_eq!(notes[0].register_key, register_key);
+        assert_eq!(
+            default_category(&parse_metadata(yaml).unwrap()),
+            "架构寄存器"
+        );
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn stores_aarch32_banked_register_notes_by_encoding_identity() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let yaml = r#"schema_version: 2
+sensor: "ARM_A32_TEST"
+vendor: "Arm"
+family: "A-profile"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch32"
+  profile: "A"
+source:
+  title: "Synthetic test"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Special:
+    access: "MRS / MSR"
+    desc: "Synthetic AArch32 system-register category"
+    registers:
+      - name: "ELR_hyp"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "Synthetic banked register"
+        encoding:
+          scheme: "aarch32_special"
+          r: 0
+          m: 1
+          m1: 14
+        accessors:
+          - name: "ELR_hyp"
+            kind: "read"
+            instruction: "MRS <Rd>, ELR_hyp"
+            encoding:
+              scheme: "aarch32_special"
+              r: 0
+              m: 1
+              m1: 14
+"#;
+        let chip_id =
+            upsert_imported_chip(&connection, yaml, "arm-a32-test.yaml", None, None).unwrap();
+        let register_key = "aarch32_special:r=0:m=1:m1=14:ELR_hyp";
+        let notes = upsert_register_note(
+            &connection,
+            &RegisterNoteInput {
+                note_id: None,
+                chip_id,
+                page_name: "Special".to_owned(),
+                register_addr: None,
+                register_key: register_key.to_owned(),
+                register_name: "ELR_hyp".to_owned(),
+                kind: "note".to_owned(),
+                content: "Banked register note".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].register_key, register_key);
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn imports_full_width_128_bit_reset_and_enum_values() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let yaml = r#"schema_version: 2
+sensor: "ARM_128_TEST"
+vendor: "Arm"
+family: "A-profile"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Synthetic test"
+  version: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Wide:
+    access: "MRRS / MSRR"
+    desc: "Synthetic 128-bit category"
+    registers:
+      - name: "WIDE_EL1"
+        access: "RW"
+        width: 16
+        bit_width: 128
+        reset: "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+        desc: "Synthetic 128-bit register"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 1
+          crm: 2
+          op2: 3
+        accessors:
+          - name: "WIDE_EL1"
+            kind: "read"
+            instruction: "MRRS <Xt>, <Xt2>, WIDE_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 2
+              op2: 3
+        fields:
+          - name: "FULL"
+            bits: "127:0"
+            reset: "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+            desc: "Full-width value"
+            values:
+              - value: "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+                desc: "All bits set"
+"#;
+        let chip_id =
+            upsert_imported_chip(&connection, yaml, "arm-128-test.yaml", None, None).unwrap();
+        assert!(query_chips(&connection)
+            .unwrap()
+            .iter()
+            .any(|record| record.id == chip_id));
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn imports_m_profile_special_and_scs_mmio_registers_together() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let yaml = r#"schema_version: 2
+sensor: "ARM_M_TEST"
+vendor: "Arm"
+family: "Armv8-M Mainline"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "Armv8-M Mainline"
+  profile: "M"
+source:
+  title: "Synthetic CMSIS test"
+  version: "test"
+  document: "core_cm33.h"
+  url: "https://example.invalid"
+  license: "Apache-2.0"
+pages:
+  Special Registers:
+    access: "MRS / MSR"
+    desc: "CPU special registers"
+    registers:
+      - name: "CONTROL"
+        access: "RW"
+        width: 4
+        bit_width: 32
+        desc: "Control register"
+        encoding:
+          scheme: "m_profile_special"
+          selector: "CONTROL"
+        accessors:
+          - name: "__get_CONTROL"
+            kind: "read"
+            instruction: "MRS <value>, CONTROL"
+            encoding:
+              scheme: "m_profile_special"
+              selector: "CONTROL"
+  SCB:
+    access: "Memory-mapped Core Peripheral"
+    desc: "System Control Block"
+    registers:
+      - addr: 0xE000ED00
+        name: "CPUID"
+        access: "RO"
+        width: 4
+        desc: "CPUID"
+"#;
+        let chip_id =
+            upsert_imported_chip(&connection, yaml, "arm-m-test.yaml", None, None).unwrap();
+        let records = query_chips(&connection).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .find(|record| record.id == chip_id)
+                .unwrap()
+                .sensor,
+            "ARM_M_TEST"
         );
         let _ = fs::remove_file(database.0);
     }

@@ -1,6 +1,7 @@
 (function () {
   const chips = Array.isArray(window.REGISTER_CHIPS) ? window.REGISTER_CHIPS : [];
   const THEME_STORAGE_KEY = "register-reference.theme";
+  const NAVIGATION_STATE_KEY = "registerReferenceNavigation";
   const themeLabels = {
     system: "跟随系统",
     light: "清晰亮色",
@@ -49,6 +50,7 @@
     calculatorLastResult: null,
     themePreference: "light",
     themeMenuOpen: false,
+    systemOverviewSnapshot: null,
   };
 
   let libraryRecords = [];
@@ -70,12 +72,16 @@
     yamlFolderInput: document.getElementById("yamlFolderInput"),
     chipMeta: document.getElementById("chipMeta"),
     statusBand: document.getElementById("statusBand"),
+    matrixViewButton: document.getElementById("matrixViewButton"),
     matrixView: document.getElementById("matrixView"),
     tableView: document.getElementById("tableView"),
+    systemOverviewBackButton: document.getElementById("systemOverviewBackButton"),
     matrixGrid: document.getElementById("matrixGrid"),
+    matrixTitle: document.getElementById("matrixTitle"),
     matrixSummary: document.getElementById("matrixSummary"),
     tableSummary: document.getElementById("tableSummary"),
     tableBody: document.getElementById("registerTableBody"),
+    registerLocatorHeader: document.getElementById("registerLocatorHeader"),
     hoverPanel: document.getElementById("hoverPanel"),
     libraryBackdrop: document.getElementById("libraryBackdrop"),
     libraryPanel: document.getElementById("libraryPanel"),
@@ -237,7 +243,136 @@
     return Math.max(1, Number(reg.bit_width ?? (Number(reg.width || 1) * 8)));
   }
 
+  function isSystemChip(chip = getChip()) {
+    return chip?.register_space?.kind === "arm_system";
+  }
+
+  function hasSystemMmioAddress(reg) {
+    if (reg?.addr === undefined || reg?.addr === null || reg?.addr === "") return false;
+    const address = Number(reg.addr);
+    return Number.isFinite(address) && address >= 0;
+  }
+
+  function encodingComponent(value, prefix = "") {
+    if (value === undefined || value === null || value === "") return "?";
+    return `${prefix}${String(value).replace(/^0[bB]/, "")}`;
+  }
+
+  function formatSystemEncoding(reg) {
+    const encoding = reg?.encoding || {};
+    if (encoding.scheme === "aarch64_sysreg") {
+      return [
+        encodingComponent(encoding.op0, "S"),
+        encodingComponent(encoding.op1),
+        encodingComponent(encoding.crn, "C"),
+        encodingComponent(encoding.crm, "C"),
+        encodingComponent(encoding.op2),
+      ].join("_");
+    }
+    if (["aarch32_cp15", "aarch32_coproc"].includes(encoding.scheme)) {
+      return [
+        encodingComponent(encoding.coproc, "p"),
+        encodingComponent(encoding.opc1 ?? encoding.op1),
+        encodingComponent(encoding.crn ?? encoding.crd, encoding.crd !== undefined ? "CRd=" : "c"),
+        encodingComponent(encoding.crm, "c"),
+        encodingComponent(encoding.opc2 ?? encoding.op2),
+      ].filter((value) => value !== "?").join(", ");
+    }
+    const values = Object.entries(encoding)
+      .filter(([key]) => key !== "scheme")
+      .map(([key, value]) => `${key}=${value}`);
+    return values.join(", ") || reg?.name || "system register";
+  }
+
+  function getPersistentRegisterIdentity(reg) {
+    if (!isSystemChip()) return `mmio:${Number(reg.addr || 0)}:${reg.name || "register"}`;
+    if (hasSystemMmioAddress(reg)) return `mmio:${Number(reg.addr)}:${reg.name || "register"}`;
+    const encoding = reg?.encoding || {};
+    const order = ["op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1", "reg", "selector"];
+    const values = order.filter((key) => encoding[key] !== undefined).map((key) => `${key}=${encoding[key]}`);
+    return `${encoding.scheme || "arm_system"}:${values.join(":")}:${reg.name || "register"}`;
+  }
+
+  function getNavigationChipId(chip = getChip()) {
+    return String(chip?._libraryId || chip?._id || chip?.sensor || state.chipIndex);
+  }
+
+  function isAppNavigationState(value) {
+    return Boolean(value && value[NAVIGATION_STATE_KEY] === true);
+  }
+
+  function createNavigationState(overrides = {}) {
+    return {
+      [NAVIGATION_STATE_KEY]: true,
+      chipId: getNavigationChipId(),
+      chipIndex: state.chipIndex,
+      pageName: state.pageName,
+      view: state.view,
+      query: state.query,
+      scrollY: Math.max(0, Math.round(window.scrollY)),
+      focusIdentity: "",
+      fromSystemOverview: false,
+      ...overrides,
+    };
+  }
+
+  function replaceNavigationState(overrides = {}) {
+    try {
+      window.history.replaceState(createNavigationState(overrides), "");
+    } catch (_error) {
+      // Some embedded webviews can disable same-document history without affecting the viewer.
+    }
+  }
+
+  function pushNavigationState(overrides = {}) {
+    try {
+      window.history.pushState(createNavigationState(overrides), "");
+    } catch (_error) {
+      return false;
+    }
+    return true;
+  }
+
+  function revealSystemRegister(identity, { focus = false } = {}) {
+    const target = getDisplayRegisters().find((item) => getPersistentRegisterIdentity(item) === identity);
+    const targetKey = target ? getRegisterKey(target) : "";
+    const row = Array.from(els.tableBody.querySelectorAll(".register-display"))
+      .find((item) => item.dataset.registerKey === targetKey);
+    if (!row) return;
+    row.classList.add("is-target");
+    row.tabIndex = -1;
+    row.scrollIntoView({ block: "center" });
+    if (focus) row.focus({ preventScroll: true });
+    window.setTimeout(() => row.classList.remove("is-target"), 1800);
+  }
+
+  function restoreNavigationState(navigation) {
+    if (!isAppNavigationState(navigation)) return;
+
+    const chipIndex = chips.findIndex((chip) => getNavigationChipId(chip) === navigation.chipId);
+    if (chipIndex >= 0) state.chipIndex = chipIndex;
+    else if (Number.isInteger(navigation.chipIndex) && chips[navigation.chipIndex]) state.chipIndex = navigation.chipIndex;
+
+    state.pageName = String(navigation.pageName || "");
+    state.view = navigation.view === "table" ? "table" : "matrix";
+    state.query = String(navigation.query || "");
+    els.searchInput.value = state.query;
+    populateChipSelect();
+    populatePageSelect();
+    render();
+    if (state.view === "matrix" && isSystemChip()) state.systemOverviewSnapshot = navigation;
+
+    window.requestAnimationFrame(() => {
+      if (state.view === "table" && navigation.focusIdentity) {
+        revealSystemRegister(navigation.focusIdentity);
+        return;
+      }
+      window.scrollTo({ top: Math.max(0, Number(navigation.scrollY) || 0), left: 0, behavior: "auto" });
+    });
+  }
+
   function formatRange(reg) {
+    if (isSystemChip() && !hasSystemMmioAddress(reg)) return formatSystemEncoding(reg);
     const start = Number(reg.addr || 0);
     const addressSpan = getAddressSpan(reg);
     const end = start + addressSpan - 1;
@@ -381,6 +516,9 @@
 
   function getDisplayRegisters() {
     const source = getRegisters();
+    if (isSystemChip()) {
+      return source.map((reg, sourceIndex) => ({ ...reg, _sourceRegisterIndex: sourceIndex, _displayOrder: sourceIndex }));
+    }
     const physical = source
       .map((reg, sourceIndex) => ({ reg, sourceIndex }))
       .filter(({ reg }) => !reg.multi_byte)
@@ -417,6 +555,13 @@
 
   function getRegisterKey(reg) {
     const chip = getChip();
+    if (isSystemChip(chip)) {
+      return [
+        chip?._id || chip?.sensor || "chip",
+        state.pageName || "page",
+        getPersistentRegisterIdentity(reg),
+      ].join("::");
+    }
     if (reg._displayKey) {
       return [
         chip?._id || chip?.sensor || "chip",
@@ -447,19 +592,21 @@
     todo: { label: "待确认", icon: "circle-help" },
   };
 
-  function getRegisterNotes(reg) {
+  function getRegisterNotes(reg, pageName = state.pageName) {
     const chip = getChip();
     const notes = Array.isArray(chip?._notes) ? chip._notes : [];
     const targets = [
-      { addr: Number(reg.addr || 0), name: reg.name },
+      { addr: isSystemChip(chip) ? null : Number(reg.addr || 0), name: reg.name, key: getPersistentRegisterIdentity(reg) },
       ...(Array.isArray(reg._noteAliases) ? reg._noteAliases : []),
     ];
     return notes.filter(
       (note) =>
-        note.pageName === state.pageName &&
-        targets.some(
-          (target) => Number(note.registerAddr) === Number(target.addr) && note.registerName === target.name,
-        ),
+        note.pageName === pageName &&
+        targets.some((target) => (
+          note.registerKey
+            ? note.registerKey === target.key
+            : target.addr !== null && Number(note.registerAddr) === Number(target.addr) && note.registerName === target.name
+        )),
     );
   }
 
@@ -513,15 +660,18 @@
   }
 
   function parseBits(bits) {
-    const text = String(bits ?? "0");
-    if (text.includes(":")) {
-      const [hiText, loText] = text.split(":");
+    const ranges = String(bits ?? "0").split(",").map((range) => {
+      const [hiText, loText = hiText] = range.trim().split(":");
       const hi = Number.parseInt(hiText, 10);
       const lo = Number.parseInt(loText, 10);
       return { hi, lo, width: hi - lo + 1 };
-    }
-    const bit = Number.parseInt(text, 10);
-    return { hi: bit, lo: bit, width: 1 };
+    });
+    return {
+      hi: Math.max(...ranges.map((range) => range.hi)),
+      lo: Math.min(...ranges.map((range) => range.lo)),
+      width: ranges.reduce((sum, range) => sum + range.width, 0),
+      ranges,
+    };
   }
 
   function parseInputValue(text) {
@@ -1445,9 +1595,12 @@
   }
 
   function extractFieldValue(regValue, field) {
-    const { lo, width } = parseBits(field.bits);
-    const mask = (1n << BigInt(width)) - 1n;
-    return (regValue >> BigInt(lo)) & mask;
+    const { ranges } = parseBits(field.bits);
+    return ranges.reduce((result, range) => {
+      const mask = (1n << BigInt(range.width)) - 1n;
+      const segment = (regValue >> BigInt(range.lo)) & mask;
+      return (result << BigInt(range.width)) | segment;
+    }, 0n);
   }
 
   function numericTokenToBigInt(token, fieldWidth) {
@@ -1486,25 +1639,43 @@
   function getFieldEnumEntries(field) {
     const entries = [];
 
+    const createEntry = (value, desc, condition = "") => {
+      const label = String(value).trim();
+      const range = label.split("..");
+      try {
+        if (range.length === 2) {
+          return { from: BigInt(range[0]), to: BigInt(range[1]), label, desc: String(desc), condition };
+        }
+        const pattern = /^0[bB]([01xX]+)$/.exec(label);
+        if (pattern && /[xX]/.test(pattern[1])) {
+          const maskText = pattern[1].replace(/[01]/g, "1").replace(/[xX]/g, "0");
+          const valueText = pattern[1].replace(/[xX]/g, "0");
+          return {
+            mask: BigInt(`0b${maskText}`),
+            match: BigInt(`0b${valueText}`),
+            label,
+            desc: String(desc),
+            condition,
+          };
+        }
+        const exact = BigInt(label);
+        return { from: exact, to: exact, label, desc: String(desc), condition };
+      } catch {
+        return null;
+      }
+    };
+
     if (field.values && !Array.isArray(field.values) && typeof field.values === "object") {
       for (const [key, desc] of Object.entries(field.values)) {
-        try {
-          const value = BigInt(key);
-          entries.push({ from: value, to: value, desc: String(desc) });
-        } catch {
-          continue;
-        }
+        const entry = createEntry(key, desc);
+        if (entry) entries.push(entry);
       }
     }
 
     if (Array.isArray(field.values)) {
       for (const item of field.values) {
-        try {
-          const value = BigInt(item.value);
-          entries.push({ from: value, to: value, desc: String(item.desc ?? item.name ?? item.value) });
-        } catch {
-          continue;
-        }
+        const entry = createEntry(item.value, item.desc ?? item.name ?? item.value, item.condition || "");
+        if (entry) entries.push(entry);
       }
     }
 
@@ -1514,7 +1685,8 @@
 
   function getStructuredEnum(field, value) {
     for (const item of getFieldEnumEntries(field)) {
-      if (value >= item.from && value <= item.to) {
+      const matches = "mask" in item ? (value & item.mask) === item.match : value >= item.from && value <= item.to;
+      if (matches) {
         return item.desc;
       }
     }
@@ -1523,6 +1695,7 @@
   }
 
   function formatEnumKey(item) {
+    if (item.label) return item.label;
     const from = item.from.toString(10);
     const to = item.to.toString(10);
     return item.from === item.to ? from : `${from}~${to}`;
@@ -1534,11 +1707,14 @@
 
     const items = enums
       .map((item) => {
-        const active = currentValue >= item.from && currentValue <= item.to;
+        const active = "mask" in item
+          ? (currentValue & item.mask) === item.match
+          : currentValue >= item.from && currentValue <= item.to;
+        const description = item.condition ? `${item.desc}（${item.condition}）` : item.desc;
         return `
           <span class="enum-chip ${active ? "active" : ""}">
             <code>${escapeHtml(formatEnumKey(item))}</code>
-            <span>${escapeHtml(item.desc)}</span>
+            <span>${escapeHtml(description)}</span>
           </span>
         `;
       })
@@ -1559,17 +1735,25 @@
     return Boolean(reg.multi_byte || reg.read_clear || reg.no_dump || reg.alias_note || reg.roles);
   }
 
-  function registerMatchesQuery(reg, query) {
+  function registerMatchesQuery(reg, query, pageName = state.pageName) {
     if (!query) return true;
     const target = [
-      formatHex(reg.addr),
+      isSystemChip() && !hasSystemMmioAddress(reg) ? formatSystemEncoding(reg) : formatHex(reg.addr),
       reg.name,
       reg.access,
       reg.reset,
       reg.desc,
+      reg.condition,
+      reg.execution_state,
+      pageName,
+      ...(reg.groups || []),
+      ...(reg.aliases || []),
+      ...(reg.accessors || []).flatMap((accessor) => [accessor.name, accessor.kind, accessor.instruction, accessor.condition]),
       reg.alias_note,
-      ...(reg.fields || []).flatMap((field) => [field.name, field.bits, field.access, field.reset, field.desc]),
-      ...getRegisterNotes(reg).flatMap((note) => [note.content, noteKinds[note.kind]?.label || note.kind]),
+      ...(reg.fields || []).flatMap((field) => [
+        field.name, field.bits, field.access, field.reset, field.reset_info, field.condition, field.reserved, field.desc,
+      ]),
+      ...getRegisterNotes(reg, pageName).flatMap((note) => [note.content, noteKinds[note.kind]?.label || note.kind]),
     ]
       .join(" ")
       .toLowerCase();
@@ -1586,10 +1770,27 @@
       return;
     }
 
+    if (isSystemChip(chip) && state.view === "matrix") {
+      const pages = Object.values(getPages(chip));
+      const registerCount = pages.reduce((sum, item) => sum + (Array.isArray(item.registers) ? item.registers.length : 0), 0);
+      const fieldCount = pages.reduce(
+        (sum, item) => sum + (item.registers || []).reduce((subtotal, reg) => subtotal + (reg.fields || []).length, 0),
+        0,
+      );
+      const noteCount = Array.isArray(chip._notes) ? chip._notes.length : 0;
+      const sourceVersion = chip.source?.version ? ` · ${chip.source.version}` : "";
+      const summary = `全局预览 · ${pages.length} 个架构分类 · ${registerCount} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${sourceVersion}`;
+      els.chipMeta.textContent = `${chip.sensor || "Unknown"} · ${chip._source || "内置数据"}`;
+      els.statusBand.textContent = state.loadMessage ? `${summary} · ${state.loadMessage}` : summary;
+      return;
+    }
+
     const fieldCount = regs.reduce((sum, reg) => sum + (reg.fields || []).length, 0);
     const noteCount = countPageNotes();
     els.chipMeta.textContent = `${chip.sensor || "Unknown"} · ${chip._source || "内置数据"}`;
-    const summary = `${state.pageName} 页 · page_id ${formatHex(page.page_id)} · ${page.access || ""} · ${regs.length} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}`;
+    const pageIdentity = isSystemChip(chip) ? "架构分类" : `page_id ${formatHex(page.page_id)}`;
+    const sourceVersion = isSystemChip(chip) && chip.source?.version ? ` · ${chip.source.version}` : "";
+    const summary = `${state.pageName} · ${pageIdentity} · ${page.access || ""} · ${regs.length} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${sourceVersion}`;
     els.statusBand.textContent = state.loadMessage ? `${summary} · ${state.loadMessage}` : summary;
   }
 
@@ -1623,11 +1824,106 @@
     if (reg.read_clear) badges.push(`<span class="badge warn">read-clear</span>`);
     if (reg.no_dump) badges.push(`<span class="badge warn">no-dump</span>`);
     if (reg.alias_note) badges.push(`<span class="badge">alias</span>`);
+    if (reg.execution_state) badges.push(`<span class="badge">${escapeHtml(reg.execution_state)}</span>`);
+    if (reg.encoding?.scheme) badges.push(`<span class="badge">${escapeHtml(reg.encoding.scheme)}</span>`);
     return badges.join("");
+  }
+
+  function syncSystemOverviewStickyMetrics() {
+    const topbar = document.querySelector(".topbar");
+    if (!topbar) return;
+    const isSticky = getComputedStyle(topbar).position === "sticky";
+    const offset = isSticky ? Math.ceil(topbar.getBoundingClientRect().height) : 0;
+    document.documentElement.style.setProperty("--system-overview-sticky-top", `${offset}px`);
+    const index = els.matrixGrid.querySelector(".system-overview-index");
+    const indexHeight = index ? Math.ceil(index.getBoundingClientRect().height) : 0;
+    els.matrixGrid.style.setProperty("--system-overview-index-height", `${indexHeight}px`);
+  }
+
+  function renderSystemOverview() {
+    const chip = getChip();
+    const query = state.query.trim().toLowerCase();
+    const pageEntries = Object.entries(getPages(chip));
+    const sections = [];
+    const indexItems = [];
+    let registerCount = 0;
+    let visibleCount = 0;
+
+    pageEntries.forEach(([pageName, page], pageIndex) => {
+      const registers = Array.isArray(page.registers) ? page.registers : [];
+      registerCount += registers.length;
+      const matching = registers
+        .map((reg, registerIndex) => ({ reg, registerIndex }))
+        .filter(({ reg }) => registerMatchesQuery(reg, query, pageName));
+      visibleCount += matching.length;
+      if (query && !matching.length) return;
+
+      const active = pageName === state.pageName;
+      indexItems.push(`
+        <button class="system-overview-index-item ${active ? "active" : ""}" type="button"
+          data-system-group-index="${pageIndex}" title="${escapeHtml(pageName)}">
+          <span>${escapeHtml(pageName)}</span><strong>${matching.length}</strong>
+        </button>
+      `);
+
+      const tiles = matching.map(({ reg, registerIndex }) => {
+        const access = String(reg.access || "");
+        const locator = hasSystemMmioAddress(reg) ? formatRange(reg) : formatSystemEncoding(reg);
+        const noteCount = getRegisterNotes(reg, pageName).length;
+        const special = hasSpecialBehavior(reg);
+        const classes = [
+          "system-overview-register",
+          "has-register",
+          getAccessClass([reg]),
+          special ? "has-special" : "",
+          noteCount ? "has-note" : "",
+        ].filter(Boolean).join(" ");
+        const tooltip = [reg.name, locator, reg.desc, reg.condition].filter(Boolean).join("\n");
+        return `
+          <button class="${classes}" type="button" data-system-page-index="${pageIndex}"
+            data-system-register-index="${registerIndex}" title="${escapeHtml(tooltip)}"
+            aria-label="查看 ${escapeHtml(reg.name || "系统寄存器")} 详情">
+            <span class="system-overview-register-name">${escapeHtml(reg.name || "-")}</span>
+            <span class="system-overview-register-meta">
+              <code>${escapeHtml(locator)}</code>
+              <span class="access-pill ${escapeHtml(access.toLowerCase())}">${escapeHtml(access)}</span>
+            </span>
+            ${noteCount ? `<span class="system-overview-note" title="${noteCount} 条备注"><i data-lucide="sticky-note"></i></span>` : ""}
+          </button>
+        `;
+      }).join("");
+
+      sections.push(`
+        <section id="system-overview-group-${pageIndex}" class="system-overview-group ${active ? "active" : ""}">
+          <div class="system-overview-group-head">
+            <h3>${escapeHtml(pageName)}</h3>
+            <span>${matching.length}/${registers.length}</span>
+          </div>
+          <div class="system-overview-register-grid">${tiles}</div>
+        </section>
+      `);
+    });
+
+    els.matrixTitle.textContent = "全局预览";
+    els.matrixGrid.classList.add("system-overview");
+    els.matrixGrid.setAttribute("aria-label", "系统寄存器全局预览");
+    els.matrixSummary.textContent = `${visibleCount}/${registerCount} 个寄存器匹配 · ${sections.length}/${pageEntries.length} 个分类`;
+    els.matrixGrid.innerHTML = sections.length
+      ? `<nav class="system-overview-index" aria-label="系统寄存器分类">${indexItems.join("")}</nav>${sections.join("")}`
+      : `<div class="empty-state">没有匹配的系统寄存器</div>`;
+    syncSystemOverviewStickyMetrics();
+    refreshIcons(els.matrixGrid);
   }
 
   function renderMatrix() {
     const regs = getDisplayRegisters();
+    if (isSystemChip()) {
+      renderSystemOverview();
+      return;
+    }
+    els.matrixTitle.textContent = "地址矩阵";
+    els.matrixGrid.classList.remove("system-overview");
+    els.matrixGrid.setAttribute("aria-label", "寄存器地址矩阵");
     const query = state.query.trim().toLowerCase();
     const index = buildRegisterIndex(regs);
     const rowBases = Array.from(new Set(Array.from(index.keys(), (addr) => Math.floor(addr / 16) * 16))).sort((a, b) => a - b);
@@ -1761,6 +2057,11 @@
         const enumList = renderEnumList(field, fieldValue);
         const fieldAccess = field.access ? `<span class="field-access">${escapeHtml(field.access)}</span>` : "";
         const fieldReset = formatReset(field.reset, bits.width);
+        const condition = field.condition ? `<div class="field-condition"><i data-lucide="git-branch"></i><span>${escapeHtml(field.condition)}</span></div>` : "";
+        const resetInfo = field.reset_info ? `<div class="field-desc"><strong>Reset:</strong> ${escapeHtml(field.reset_info)}</div>` : "";
+        const accessRules = Array.isArray(field.access_rules) && field.access_rules.length
+          ? `<div class="field-desc"><strong>Access:</strong> ${field.access_rules.map((rule) => escapeHtml(rule.condition ? `${rule.access} · ${rule.condition}` : rule.access)).join("<br>")}</div>`
+          : "";
         return `
           <div class="field-row ${isSet ? "is-set" : ""}">
             <div class="field-name">${escapeHtml(field.name)} ${fieldAccess}</div>
@@ -1768,8 +2069,11 @@
             <div class="field-value">${escapeHtml(valueLabel)}</div>
             <div class="field-meaning">
               ${meaning ? `<strong>${escapeHtml(meaning)}</strong>` : `<span class="muted">未匹配枚举</span>`}
+              ${condition}
               ${enumList}
               ${desc && !compact ? `<div class="field-desc">${escapeHtml(desc).replace(/\n/g, "<br>")}</div>` : ""}
+              ${compact ? "" : resetInfo}
+              ${compact ? "" : accessRules}
             </div>
           </div>
         `;
@@ -1783,7 +2087,7 @@
     return `
       <div class="register-block register-display" data-register-key="${escapeHtml(key)}">
         <div class="register-heading">
-          <h3>${escapeHtml(reg.name)} <span class="addr-cell">${formatRange(reg)}</span></h3>
+          <h3>${escapeHtml(reg.name)} <span class="addr-cell">${escapeHtml(formatRange(reg))}</span></h3>
           ${compact ? "" : renderNoteEditButton(reg)}
         </div>
         <div class="hover-meta">
@@ -1791,6 +2095,7 @@
         </div>
         ${renderRegisterValueEditor(reg, false)}
         <div class="register-desc">${escapeHtml(reg.desc || "").replace(/\n/g, "<br>")}</div>
+        ${reg.condition ? `<div class="register-desc system-condition"><i data-lucide="git-branch"></i> ${escapeHtml(reg.condition)}</div>` : ""}
         ${reg.alias_note ? `<div class="register-desc"><span class="badge">alias</span> ${escapeHtml(reg.alias_note)}</div>` : ""}
         ${renderRegisterNotes(reg)}
         <div class="bit-lane-slot">${renderBitLane(reg, valueInfo)}</div>
@@ -1955,6 +2260,35 @@
   }
 
   function handleRegisterCellActivate(cell, { viaKeyboard = false } = {}) {
+    if (cell.classList.contains("system-overview-register")) {
+      const pageIndex = Number(cell.dataset.systemPageIndex);
+      const registerIndex = Number(cell.dataset.systemRegisterIndex);
+      const pageEntry = Object.entries(getPages(getChip()))[pageIndex];
+      const reg = pageEntry?.[1]?.registers?.[registerIndex];
+      if (!pageEntry || !reg) return;
+
+      const targetIdentity = getPersistentRegisterIdentity(reg);
+      state.systemOverviewSnapshot = createNavigationState({
+        view: "matrix",
+        scrollY: window.scrollY,
+        focusIdentity: "",
+        fromSystemOverview: false,
+      });
+      replaceNavigationState(state.systemOverviewSnapshot);
+      state.pageName = pageEntry[0];
+      state.view = "table";
+      populatePageSelect();
+      pushNavigationState({
+        focusIdentity: targetIdentity,
+        fromSystemOverview: true,
+      });
+      render();
+      window.requestAnimationFrame(() => {
+        revealSystemRegister(targetIdentity, { focus: viaKeyboard });
+      });
+      return;
+    }
+
     const addr = Number(cell.dataset.address);
     if (!Number.isFinite(addr)) return;
     if (state.activeHoverAddress === addr && !els.hoverPanel.hidden) {
@@ -1964,13 +2298,37 @@
     showDetailPanel(addr, cell, { focusPanel: viaKeyboard });
   }
 
+  function renderRegisterLocator(reg) {
+    if (!isSystemChip()) return escapeHtml(formatRange(reg));
+    if (hasSystemMmioAddress(reg)) return `<code class="system-encoding">${escapeHtml(formatRange(reg))}</code>`;
+    const accessors = Array.from(new Set((reg.accessors || []).map((item) => item.name).filter(Boolean)));
+    return `
+      <code class="system-encoding">${escapeHtml(formatSystemEncoding(reg))}</code>
+      ${accessors.length ? `<div class="system-accessor-names">${accessors.map((name) => `<span>${escapeHtml(name)}</span>`).join("")}</div>` : ""}
+    `;
+  }
+
+  function renderSystemRegisterDetails(reg) {
+    if (!isSystemChip()) return "";
+    const accessors = Array.isArray(reg.accessors) ? reg.accessors : [];
+    return `
+      ${reg.condition ? `<div class="system-condition"><i data-lucide="git-branch"></i><span>${escapeHtml(reg.condition)}</span></div>` : ""}
+      ${accessors.length ? `<div class="system-accessors">${accessors.map((item) => `
+        <div><span class="badge">${escapeHtml(item.kind === "read" ? "READ" : item.kind === "write" ? "WRITE" : "IMPLICIT")}</span><code>${escapeHtml(item.instruction)}</code>${item.condition ? `<span>${escapeHtml(item.condition)}</span>` : ""}</div>
+      `).join("")}</div>` : ""}
+    `;
+  }
+
   function renderTable() {
     const regs = getDisplayRegisters();
     const query = state.query.trim().toLowerCase();
     const rows = regs.filter((reg) => registerMatchesQuery(reg, query));
 
     const noteCount = rows.reduce((count, reg) => count + getRegisterNotes(reg).length, 0);
-    els.tableSummary.textContent = `${rows.length}/${regs.length} 个寄存器匹配 · ${noteCount} 条备注 · 每个寄存器独立保存输入值`;
+    const locatorType = isSystemChip()
+      ? (regs.some((reg) => hasSystemMmioAddress(reg)) ? "系统编码 / MMIO 地址" : "结构化系统编码")
+      : "MMIO 地址";
+    els.tableSummary.textContent = `${rows.length}/${regs.length} 个寄存器匹配 · ${noteCount} 条备注 · ${locatorType} · 每个寄存器独立保存输入值`;
 
     if (!rows.length) {
       els.tableBody.innerHTML = `<tr><td colspan="6"><div class="empty-state">没有匹配的寄存器</div></td></tr>`;
@@ -1982,7 +2340,7 @@
         const key = getRegisterKey(reg);
         return `
         <tr class="register-display" data-register-key="${escapeHtml(key)}">
-          <td class="addr-cell">${formatRange(reg)}</td>
+          <td class="addr-cell">${renderRegisterLocator(reg)}</td>
           <td class="name-cell">
             <div class="name-cell-heading">
               <strong>${escapeHtml(reg.name)}</strong>
@@ -1994,6 +2352,7 @@
           <td class="value-cell">${renderRegisterValueEditor(reg, true)}</td>
           <td class="desc-cell">
             ${escapeHtml(reg.desc || "").replace(/\n/g, "<br>")}
+            ${renderSystemRegisterDetails(reg)}
             ${reg.alias_note ? `<div class="field-desc">${escapeHtml(reg.alias_note)}</div>` : ""}
             ${renderRegisterNotes(reg)}
           </td>
@@ -2055,6 +2414,8 @@
 
   function render() {
     hideHoverPanel();
+    syncSystemOverviewStickyMetrics();
+    setView(state.view);
     updateAttachmentsButton();
     summarizePage();
     renderMatrix();
@@ -2062,6 +2423,7 @@
   }
 
   function fallbackCategory(record) {
+    if (record.deviceType === "architecture_registers") return "架构寄存器";
     return record.deviceType === "usb_controller" ? "接口控制器" : "传感器";
   }
 
@@ -2129,7 +2491,7 @@
         vendor: chip.vendor || "",
         family: chip.family || "",
         deviceType: chip.device_type || "",
-        category: chip._category || (chip.device_type === "usb_controller" ? "接口控制器" : "传感器"),
+        category: chip._category || fallbackCategory({ deviceType: chip.device_type }),
         enabled: true,
         builtin: true,
         sourceKind: "builtin",
@@ -2296,7 +2658,8 @@
           noteId: state.editingNoteId,
           chipId: chip._libraryId || chip._id,
           pageName: state.pageName,
-          registerAddr: Number(reg.addr || 0),
+          registerAddr: isSystemChip(chip) ? null : Number(reg.addr || 0),
+          registerKey: getPersistentRegisterIdentity(reg),
           registerName: reg.name,
           kind: state.noteKind,
           content,
@@ -2672,7 +3035,7 @@
             vendor: chip.vendor || "",
             family: chip.family || "",
             deviceType: chip.device_type || "",
-            category: chip._category || (chip.device_type === "usb_controller" ? "接口控制器" : "传感器"),
+            category: chip._category || fallbackCategory({ deviceType: chip.device_type }),
             enabled: true,
             builtin: false,
             sourceKind: "imported",
@@ -2842,16 +3205,61 @@
   }
 
   function setView(view) {
-    state.view = view;
-    els.matrixView.classList.toggle("hidden", view !== "matrix");
-    els.tableView.classList.toggle("hidden", view !== "table");
+    const system = isSystemChip();
+    const resolvedView = view === "table" ? "table" : "matrix";
+    state.view = resolvedView;
+    const matrixLabel = system ? "全局预览" : "矩阵视图";
+    els.matrixViewButton.title = matrixLabel;
+    els.matrixViewButton.setAttribute("aria-label", matrixLabel);
+    els.matrixTitle.textContent = system ? "全局预览" : "地址矩阵";
+    els.searchInput.placeholder = system && resolvedView === "matrix"
+      ? "全部分类 / 编码 / 名称 / 字段"
+      : "地址 / 编码 / 名称 / 字段";
+    els.registerLocatorHeader.textContent = system
+      ? (getRegisters().some((reg) => hasSystemMmioAddress(reg)) ? "系统编码 / 地址" : "系统编码")
+      : "地址";
+    els.matrixViewButton.hidden = false;
+    els.systemOverviewBackButton.hidden = !(system && resolvedView === "table");
+    els.matrixView.classList.toggle("hidden", resolvedView !== "matrix");
+    els.tableView.classList.toggle("hidden", resolvedView !== "table");
     els.viewButtons.forEach((button) => {
-      const active = button.dataset.view === view;
+      const active = button.dataset.view === resolvedView;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", String(active));
       button.tabIndex = active ? 0 : -1;
     });
     hideHoverPanel();
+  }
+
+  function returnToSystemOverview() {
+    if (!isSystemChip()) return;
+    const currentChipId = getNavigationChipId();
+    if (
+      isAppNavigationState(window.history.state) &&
+      window.history.state.fromSystemOverview &&
+      window.history.state.chipId === currentChipId
+    ) {
+      window.history.back();
+      return;
+    }
+
+    if (
+      isAppNavigationState(state.systemOverviewSnapshot) &&
+      state.systemOverviewSnapshot.chipId === currentChipId
+    ) {
+      restoreNavigationState(state.systemOverviewSnapshot);
+      replaceNavigationState(state.systemOverviewSnapshot);
+      return;
+    }
+
+    state.view = "matrix";
+    render();
+    replaceNavigationState({
+      view: "matrix",
+      scrollY: window.scrollY,
+      focusIdentity: "",
+      fromSystemOverview: false,
+    });
   }
 
   function bindEvents() {
@@ -3090,6 +3498,12 @@
       state.pageName = els.pageSelect.value;
       state.loadMessage = "";
       render();
+      if (isSystemChip() && state.view === "matrix") {
+        const pageIndex = Object.keys(getPages(getChip())).indexOf(state.pageName);
+        window.requestAnimationFrame(() => {
+          document.getElementById(`system-overview-group-${pageIndex}`)?.scrollIntoView({ block: "start" });
+        });
+      }
     });
 
     els.searchInput.addEventListener("input", () => {
@@ -3098,10 +3512,27 @@
     });
 
     els.viewButtons.forEach((button) => {
-      button.addEventListener("click", () => setView(button.dataset.view));
+      button.addEventListener("click", () => {
+        if (button.dataset.view === "matrix" && isSystemChip() && state.view === "table") {
+          returnToSystemOverview();
+          return;
+        }
+        setView(button.dataset.view);
+        replaceNavigationState({
+          focusIdentity: "",
+          fromSystemOverview: false,
+        });
+      });
     });
 
+    els.systemOverviewBackButton.addEventListener("click", returnToSystemOverview);
+
     els.matrixGrid.addEventListener("click", (event) => {
+      const groupLink = event.target.closest("[data-system-group-index]");
+      if (groupLink && els.matrixGrid.contains(groupLink)) {
+        document.getElementById(`system-overview-group-${groupLink.dataset.systemGroupIndex}`)?.scrollIntoView({ block: "start" });
+        return;
+      }
       const cell = event.target.closest(".has-register");
       if (!cell || !els.matrixGrid.contains(cell)) return;
       handleRegisterCellActivate(cell);
@@ -3150,9 +3581,11 @@
 
     window.addEventListener("scroll", repositionOrHideDetailPanel, { capture: true, passive: true });
     window.addEventListener("resize", () => {
+      syncSystemOverviewStickyMetrics();
       repositionOrHideDetailPanel();
       clampOpenRadixDialog();
     });
+    window.addEventListener("popstate", (event) => restoreNavigationState(event.state));
   }
 
   function init() {
@@ -3163,6 +3596,8 @@
     populatePageSelect();
     setView("matrix");
     render();
+    if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
+    replaceNavigationState({ view: "matrix" });
     refreshIcons();
     initializeLibrary().catch((error) => {
       state.loadMessage = `芯片库加载失败：${error.message || String(error)}`;

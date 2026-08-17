@@ -27,6 +27,58 @@ node <skill-dir>/scripts/check-browser-yaml.js <chip.yaml>
 
 桌面应用和纯 HTML 查看器在导入时还会自动执行内置严格校验，不依赖用户安装 Python 或 Node。这里的两个脚本用于 YAML 制作阶段和 CI，便于生成者在交付前定位问题；不能用应用导入成功代替原始资料核对。
 
+## ARM 官方系统寄存器
+
+A-profile 系统寄存器优先使用 Arm 官方 System Register XML，不从 PDF 或网络二手表格手工重建。详细流程见项目的 `docs/arm-system-registers.md`。
+
+```bash
+npm run arm:import -- <SysReg_xml_A_profile.tar.gz或解压目录> \
+  --output <arm-system-registers.yaml> \
+  --state AArch64 \
+  --version <官方版本> \
+  --revision <Arm ARM revision>
+```
+
+- 使用 schema v2、`register_space.kind: arm_system`；不得将 MRS/MSR 编码伪装成 `addr`。
+- AArch64 使用 `aarch64_sysreg`/`aarch64_special`；AArch32 按官方访问机制区分 `aarch32_cp15`、`aarch32_coproc`、`aarch32_special` 与 `aarch32_vfp`。保留每个 accessor 的编码和条件。
+- 保留 feature 条件、条件重叠字段、RES0/RES1、非连续位域、128-bit 宽度、通配/区间枚举和 `source_ref`。
+- `source.version`、`source.revision`、`source.url`、`source.license`、`source.notice` 必须对应实际下载包。
+- 每次都阅读目标包的 `notice.xml`。Arm XML 是专有资料；没有确认再分发权限时，只在本地生成和导入，不提交原始 XML 或完整生成 YAML。
+- 当前 A-profile 下载包只有 XML/HTML，没有独立 JSON 包。不要把第三方 JSON 当作 Arm 官方事实来源。
+- Cortex-M/CMSIS 使用下方的独立导入路径，不要套用 A-profile 编码。
+
+### Cortex-M / CMSIS 官方数据
+
+Cortex-M 的官方来源分成两层：
+
+1. `CMSIS/Core/Include/core_cm*.h` 和 `m-profile/cmsis_gcc_m.h`：CPU 特殊寄存器、SCS/CoreSight 结构体偏移、访问属性、基地址、位域位置和掩码。
+2. `ARM-software/Cortex_DFP` 的 `.svd` 文件：当前官方包中的 Cortex-M SVD 主要是示例/设备元数据，很多文件明确标记为虚构且不完整，不应当当作完整 SCS 位域数据库。
+
+使用 CMSIS-Core 导入器：
+
+```bash
+npm run arm:cmsis-import -- <CMSIS_6目录> \
+  --core cm33 \
+  --version 6.3.0 \
+  --output arm-cm33-system-registers.yaml
+```
+
+支持 `cm0`、`cm0plus`、`cm1`、`cm23`、`cm3`、`cm33`、`cm35p`、`cm4`、`cm52`、`cm55`、`cm7`、`cm85`。输出使用 `register_space.profile: M`：MRS/MSR 特殊寄存器使用 `m_profile_special`，SCB/NVIC/SysTick/MPU/SAU/FPU/DWT 等使用官方头文件中的真实 MMIO 地址。数组寄存器会展开为带索引的条目，Secure/Non-secure SCS 别名也会保留。
+
+[CMSIS_6](https://github.com/ARM-software/CMSIS_6) 和 [Cortex_DFP](https://github.com/ARM-software/Cortex_DFP) 均为 Apache-2.0。分发生成 YAML 时保留 Arm 版权和许可证说明。CMSIS 没有为 `PRIMASK`、`FAULTMASK`、`BASEPRI` 和堆栈指针类特殊寄存器提供完整的 `*_Pos`/`*_Msk` 宏；导入器中的少量 `SPECIAL_FIELDS` 是明确标注的 M-profile 架构语义补充，不得继续凭经验扩张。每次更新 CMSIS 版本后运行：
+
+```bash
+npm run test:arm-cmsis-import
+python3 .agents/skills/register-yaml-generator/scripts/validate_register_yaml.py --strict arm-cm33-system-registers.yaml
+node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js arm-cm33-system-registers.yaml
+```
+
+导入器自身回归测试：
+
+```bash
+npm run test:arm-import
+```
+
 ## 质量规则
 
 - 以 datasheet 为事实来源；不要根据相邻型号或常识补值。

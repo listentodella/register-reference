@@ -4,6 +4,7 @@ src-tauri/target/
 src-tauri/gen/schemas/
 __pycache__/
 *.py[cod]
+*.bak
 .DS_Store
 
 # Imported chip libraries are local user data. Public samples must be
@@ -13,3 +14,6 @@ __pycache__/
 !/dwc3_rk3588.yaml
 /data/chips.data.js
 /register-reference.html
+
+# Local licensed/reference archives and generated Arm register datasets.
+/arm-system-registers-local/

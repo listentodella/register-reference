@@ -1,0 +1,59 @@
+# ARM system-register schema v2 template. Do not use MMIO addr/page_id/who_am_i fields.
+schema_version: 2
+sensor: "ARM AArch64 system registers"
+vendor: "Arm"
+family: "A-profile architecture"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Arm Architecture System Registers XML"
+  version: "RELEASE_VERSION"
+  revision: "ARM_ARM_REVISION"
+  document: "Arm Architecture Reference Manual, A-profile system-register XML"
+  url: "OFFICIAL_DOWNLOAD_URL"
+  license: "Arm proprietary; review notice.xml before use"
+  notice: "NOTICE_IDENTIFIER"
+
+pages:
+  Functional Group:
+    access: "MRS / MSR system-register interface"
+    desc: "Architectural system-register category"
+    registers:
+      - name: "REGISTER_EL1"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Register purpose"
+        execution_state: "AArch64"
+        condition: "when FEAT_EXAMPLE is implemented"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 0
+          crm: 0
+          op2: 0
+        accessors:
+          - name: "REGISTER_EL1"
+            kind: "read"
+            instruction: "MRS <Xt>, REGISTER_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 0
+              crm: 0
+              op2: 0
+        source_ref: "AArch64-register_el1.xml"
+        fields:
+          - name: "FIELD"
+            bits: "7:4"
+            access: "RW"
+            desc: "Field purpose"
+            condition: "When FEAT_EXAMPLE is implemented"
+            values:
+              - value: "0b0000"
+                desc: "Disabled"
