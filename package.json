@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "data:build": "node tools/build-data.mjs",
-    "web:build": "npm run data:build && node tools/build-web.mjs",
+    "workers:build": "node tools/build-search-worker-inline.mjs && node tools/build-import-worker-inline.mjs",
+    "web:build": "npm run data:build && npm run workers:build && node tools/build-web.mjs",
     "arm:import": "node tools/import-arm-mrs.mjs",
     "arm:cmsis-import": "node tools/import-arm-cmsis.mjs",
     "riscv:import": "node tools/import-riscv-csr.mjs",
@@ -26,6 +27,7 @@
     "yaml": "2.9.0"
   },
   "dependencies": {
+    "fuse.js": "^7.1.0",
     "jsep": "1.4.0",
     "lucide": "1.30.0"
   }

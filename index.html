@@ -31,10 +31,23 @@
             <span>页面</span>
             <select id="pageSelect"></select>
           </label>
-          <label class="control search-control">
-            <span>搜索</span>
-            <input id="searchInput" type="search" spellcheck="false" placeholder="地址 / 编码 / 名称 / 字段">
-          </label>
+          <div id="searchControl" class="control search-control">
+            <label for="searchInput">全库搜索</label>
+            <div class="search-input-wrap">
+              <i data-lucide="search"></i>
+              <input id="searchInput" type="search" spellcheck="false" autocomplete="off"
+                placeholder="寄存器、位域、说明或备注" role="combobox" aria-autocomplete="list"
+                aria-controls="searchResults" aria-expanded="false">
+              <span id="searchActivity" class="search-activity" hidden aria-label="正在搜索"></span>
+            </div>
+            <div id="searchPanel" class="search-panel" hidden>
+              <div class="search-panel-head">
+                <span id="searchSummary">输入内容以搜索整个芯片库</span>
+                <kbd>↑↓</kbd><kbd>Enter</kbd><kbd>Esc</kbd>
+              </div>
+              <div id="searchResults" class="search-results" role="listbox" aria-label="全库搜索结果"></div>
+            </div>
+          </div>
           <div id="languageSwitcher" class="language-switcher">
             <div id="languageControl" class="language-control" role="tablist" aria-label="译文显示模式">
               <button type="button" role="tab" data-language-mode="zh" aria-selected="false">中文</button>
@@ -509,6 +522,8 @@
     <script src="yaml-lite.js"></script>
     <script src="yaml-validator.js"></script>
     <script src="translation-validator.js"></script>
+    <script src="search-worker-inline.js"></script>
+    <script src="import-worker-inline.js"></script>
     <script src="vendor/lucide.min.js"></script>
     <script src="vendor/jsep.min.js"></script>
     <script src="app.js"></script>

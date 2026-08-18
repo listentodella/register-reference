@@ -2838,6 +2838,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "strsim",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

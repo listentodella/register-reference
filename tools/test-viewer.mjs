@@ -27,6 +27,14 @@ try {
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(error.message));
+  const waitForSearch = async () => {
+    await page.waitForFunction(() => {
+      const panel = document.querySelector("#searchPanel");
+      return panel && !panel.hidden && !document.querySelector("#searchActivity")?.hidden
+        ? false
+        : Boolean(panel && !panel.hidden && document.querySelector(".search-result"));
+    });
+  };
 
   await page.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   const toolbarLayout = await page.evaluate(() => ({
@@ -466,7 +474,8 @@ translations:
   await page.locator("#importResultConfirmButton").click();
   assert.equal(await page.locator("#chipSelect option:checked").innerText(), "ARM 界面测试 / ARM_UI_TEST");
   await page.locator("#searchInput").fill("合成系统寄存器");
-  assert.equal(await page.locator(".system-overview-register").count(), 1);
+  await waitForSearch();
+  assert.ok(await page.locator(".search-result[data-kind='register']").filter({ hasText: "TEST_EL1" }).count() >= 1);
   await page.locator("#searchInput").fill("");
   assert.equal(await page.locator("#matrixViewButton").isHidden(), false);
   assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-label"), "全局预览");
@@ -484,7 +493,11 @@ translations:
   assert.match(await page.locator("#registerTableBody .desc-cell").innerText(), /合成系统寄存器/);
   assert.doesNotMatch(await page.locator("#registerTableBody .desc-cell").innerText(), /Synthetic system register/);
   await page.locator("#searchInput").fill("Synthetic system register");
-  assert.equal(await page.locator("#registerTableBody tr").count(), 1, "search should match English while Chinese display mode is active");
+  await waitForSearch();
+  assert.ok(
+    await page.locator(".search-result[data-kind='register']").filter({ hasText: "TEST_EL1" }).count() >= 1,
+    "search should match English while Chinese display mode is active",
+  );
   await page.locator("#searchInput").fill("");
   await page.locator("[data-language-mode='en']").click();
   assert.match(await page.locator("#registerTableBody .desc-cell").innerText(), /Synthetic system register/);
@@ -507,7 +520,8 @@ translations:
   assert.match(await splitField.locator(".field-meaning").innerText(), /资料未定义当前值/);
   assert.equal(await page.locator("#registerTableBody .field-condition").count(), 2);
   await page.locator("#searchInput").fill("FEAT_TEST");
-  assert.equal(await page.locator("#registerTableBody tr").count(), 1);
+  await waitForSearch();
+  assert.ok(await page.locator(".search-result[data-kind='register']").filter({ hasText: "TEST_EL1" }).count() >= 1);
   await page.locator("#searchInput").fill("");
 
   const riscvRegisterYaml = `schema_version: 2
@@ -601,11 +615,11 @@ pages:
   assert.equal(await page.locator(".system-overview-register").count(), 2);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await page.locator("#searchInput").fill("0x300");
-  assert.equal(await page.locator(".system-overview-register").count(), 1);
-  assert.match(await page.locator(".system-overview-register").innerText(), /mstatus/);
+  await waitForSearch();
+  assert.ok(await page.locator(".search-result[data-kind='register']").filter({ hasText: "mstatus" }).count() >= 1);
   await page.locator("#searchInput").fill("Sm");
-  assert.equal(await page.locator(".system-overview-register").count(), 1);
-  assert.match(await page.locator(".system-overview-register").innerText(), /mstatus/);
+  await waitForSearch();
+  assert.ok(await page.locator(".search-result[data-kind='register']").filter({ hasText: "mstatus" }).count() >= 1);
   await page.locator("#searchInput").fill("");
   await page.locator(".system-overview-register").filter({ hasText: "mstatus" }).click();
   await page.waitForFunction(() => document.querySelector("#tableViewButton")?.getAttribute("aria-selected") === "true");
@@ -614,18 +628,22 @@ pages:
   assert.deepEqual(await page.locator("#registerTableBody .system-accessors .badge").allTextContents(), ["READ", "WRITE"]);
   assert.equal(await page.locator("#pageSelect").inputValue(), "Machine");
   await page.locator("#searchInput").fill("CSRRS");
-  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp", "mstatus"]);
-  assert.match(await page.locator("#tableSummary").innerText(), /跨 2 个分类搜索/);
-  assert.deepEqual(await page.locator("#registerTableBody .register-page-link span").allTextContents(), ["Supervisor", "Machine"]);
+  await waitForSearch();
+  const csrrsResults = await page.locator(".search-result[data-kind='register'] .search-result-title").allTextContents();
+  assert.ok(csrrsResults.includes("satp") && csrrsResults.includes("mstatus"));
   await page.locator("#searchInput").fill("satp");
+  await waitForSearch();
   assert.equal(await page.locator("#pageSelect").inputValue(), "Machine", "global search should not require changing the active page");
-  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp"]);
-  assert.match(await page.locator("#tableSummary").innerText(), /跨 1 个分类搜索/);
-  assert.equal(await page.locator("#registerTableBody .register-page-link").innerText(), "Supervisor");
-  await page.locator("#registerTableBody .register-page-link").click();
+  await page.locator(".search-result[data-kind='register']").filter({ hasText: "satp" }).first().click();
   await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Supervisor");
-  assert.equal(await page.locator("#searchInput").inputValue(), "");
+  assert.equal(await page.locator("#searchInput").inputValue(), "satp");
   assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp"]);
+  await page.goBack();
+  await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Machine");
+  assert.equal(await page.locator("#searchInput").inputValue(), "satp");
+  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["mstatus"]);
+  await page.goForward();
+  await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Supervisor");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
 
   const aarch32RegisterYaml = `schema_version: 2
@@ -734,7 +752,8 @@ pages:
     "selector=APSR",
   ]);
   await page.locator("#searchInput").fill("VMRS");
-  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["FPSCR"]);
+  await waitForSearch();
+  assert.ok(await page.locator(".search-result[data-kind='register']").filter({ hasText: "FPSCR" }).count() >= 1);
   await page.locator("#searchInput").fill("");
 
   const mProfileBulkRegisters = Array.from({ length: 120 }, (_, index) => {
@@ -866,20 +885,33 @@ ${mProfileBulkRegisters}
   await page.selectOption("#chipSelect", { label: "RK3588_DWC3" });
   await page.locator("#tableViewButton").click();
   await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG0");
+  await waitForSearch();
+  await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_GSBUSCFG0" }).first().click();
+  await page.waitForSelector("#registerTableBody tr.is-target");
   const dataEndianField = page.locator("#registerTableBody .field-row").filter({ hasText: "datbigend" });
   assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Little-endian \(default\)/);
   assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b0/);
-  await page.locator("#registerTableBody .register-value-input").fill("0x00000801");
+  await page.getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000801");
   assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Big-endian/);
   assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b1/);
-  await page.locator("#registerTableBody .register-value-input").fill("0x00000001");
+  await page.getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000001");
   await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG1");
+  await waitForSearch();
+  await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_GSBUSCFG1" }).first().click();
+  await page.waitForSelector("#registerTableBody tr.is-target");
   const pipelineLimitField = page.locator("#registerTableBody .field-row").filter({ hasText: "pipe_trans_limit" });
   assert.match(await pipelineLimitField.locator(".field-meaning").innerText(), /4 requests/);
   assert.match(await pipelineLimitField.locator(".enum-chip.active").innerText(), /4'h3/);
   await page.locator("#searchInput").fill("USB3OTG_DGCMD");
-  await page.getByRole("textbox", { name: "USB3OTG_DGCMD 的寄存器值" }).fill("0x00000008");
-  const commandTypeField = page.locator("#registerTableBody .field-row").filter({ hasText: "cmdtyp" });
+  await waitForSearch();
+  await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_DGCMD" }).first().click();
+  await page.waitForSelector("#registerTableBody tr.is-target");
+  const commandInput = page.getByRole("textbox", { name: "USB3OTG_DGCMD 的寄存器值" });
+  await commandInput.fill("0x00000008");
+  const commandTypeField = page.locator("#registerTableBody tr")
+    .filter({ has: commandInput })
+    .locator(".field-row")
+    .filter({ hasText: "cmdtyp" });
   assert.match(await commandTypeField.locator(".field-meaning").innerText(), /Start New Configuration/);
   assert.match(await commandTypeField.locator(".enum-chip.active").innerText(), /8'h8/);
   await page.locator("#searchInput").fill("");
@@ -1127,6 +1159,7 @@ pages:
           sourceKind: "builtin",
           sourceName: "builtin.yaml",
           sourcePath: null,
+          sourceSha256: "builtin-v1",
           yamlText: yaml,
           notes: [],
           attachments: [],
@@ -1144,6 +1177,7 @@ pages:
           sourceKind: "imported",
           sourceName: "imported.yaml",
           sourcePath: null,
+          sourceSha256: "imported-v1",
           yamlText: yaml,
           notes: [{ id: 1, content: "local note" }],
           attachments: [{ id: 1, fileName: "manual.pdf" }],
@@ -1161,6 +1195,7 @@ pages:
           sourceKind: "linked",
           sourceName: "linked.yaml",
           sourcePath: "/library/linked.yaml",
+          sourceSha256: "linked-v1",
           yamlText: yaml,
           notes: [],
           attachments: [],
@@ -1172,7 +1207,16 @@ pages:
         core: {
           invoke: async (command, args = {}) => {
             window.__libraryCommands.push({ command, args });
-            if (command === "list_chips") return structuredClone(records);
+            if (command === "list_chip_summaries") {
+              return structuredClone(records.map(({ yamlText: _yamlText, ...record }) => record));
+            }
+            if (command === "load_chip_document") {
+              const record = records.find((item) => item.id === args.chipId);
+              return { chipData: window.parseRegisterYaml(record.yamlText), translations: [] };
+            }
+            if (command === "search_index_status") {
+              return { ready: true, indexedChips: records.length, totalChips: records.length };
+            }
             if (command === "set_chip_enabled") {
               records.find((record) => record.id === args.chipId).enabled = args.enabled;
               return null;
@@ -1194,6 +1238,8 @@ pages:
   );
   await libraryPage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   await libraryPage.waitForFunction(() => document.querySelectorAll("#chipSelect option").length === 3);
+  assert.ok(await libraryPage.evaluate(() => window.__libraryCommands.some((item) => item.command === "list_chip_summaries")));
+  assert.ok(await libraryPage.evaluate(() => window.__libraryCommands.some((item) => item.command === "load_chip_document")));
   assert.equal(await libraryPage.locator("#libraryQuickButton").isVisible(), true);
   await libraryPage.locator("#libraryQuickButton").click();
   await libraryPage.waitForSelector("#libraryBackdrop:not([hidden])");
@@ -1344,6 +1390,9 @@ pages:
   await notesPage.locator("#hoverPanel .hover-close").click();
 
   await notesPage.locator("#searchInput").fill("状态稳定");
+  await notesPage.waitForFunction(
+    () => document.querySelectorAll("#matrixGrid .has-register:not(.filtered-out)").length === 1,
+  );
   assert.equal(await notesPage.locator("#matrixGrid .has-register:not(.filtered-out)").count(), 1);
   await notesPage.locator("#tableViewButton").click();
   assert.match(await notesPage.locator("#registerTableBody .register-note").innerText(), /切换模式后等待状态稳定/);

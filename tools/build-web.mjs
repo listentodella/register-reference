@@ -8,7 +8,7 @@ await rm(dist, { recursive: true, force: true });
 await mkdir(resolve(dist, "data"), { recursive: true });
 await mkdir(resolve(dist, "vendor"), { recursive: true });
 
-for (const file of ["index.html", "styles.css", "yaml-lite.js", "yaml-validator.js", "translation-validator.js", "app.js"]) {
+for (const file of ["index.html", "styles.css", "yaml-lite.js", "yaml-validator.js", "translation-validator.js", "search-worker.js", "search-worker-inline.js", "import-worker.js", "import-worker-inline.js", "app.js"]) {
   await cp(resolve(root, file), resolve(dist, file));
 }
 
@@ -16,5 +16,6 @@ await cp(resolve(root, "data", "chips.data.js"), resolve(dist, "data", "chips.da
 await cp(resolve(root, "favicon.png"), resolve(dist, "favicon.png"));
 await cp(resolve(root, "vendor", "lucide.min.js"), resolve(dist, "vendor", "lucide.min.js"));
 await cp(resolve(root, "vendor", "jsep.min.js"), resolve(dist, "vendor", "jsep.min.js"));
+await cp(resolve(root, "vendor", "fuse.min.js"), resolve(dist, "vendor", "fuse.min.js"));
 
 console.log(`wrote ${dist}`);

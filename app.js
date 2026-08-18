@@ -18,6 +18,14 @@
     pageName: "",
     view: "matrix",
     query: "",
+    searchQuery: "",
+    searchResults: [],
+    searchActiveIndex: -1,
+    searchOpen: false,
+    searchLoading: false,
+    searchRequestId: 0,
+    searchIndexReady: false,
+    searchFallbackFiltering: false,
     registerValues: new Map(),
     activeHoverAddress: null,
     loadMessage: "",
@@ -59,11 +67,24 @@
   };
 
   let libraryRecords = [];
+  const chipDocumentCache = new Map();
+  let searchDebounceTimer = 0;
+  let searchWorker = null;
+  let searchWorkerBlobUrl = "";
+  let importWorker = null;
+  let importWorkerBlobUrl = "";
+  let importRequestId = 0;
+  const importRequests = new Map();
 
   const els = {
     chipSelect: document.getElementById("chipSelect"),
     pageSelect: document.getElementById("pageSelect"),
     searchInput: document.getElementById("searchInput"),
+    searchControl: document.getElementById("searchControl"),
+    searchPanel: document.getElementById("searchPanel"),
+    searchSummary: document.getElementById("searchSummary"),
+    searchResults: document.getElementById("searchResults"),
+    searchActivity: document.getElementById("searchActivity"),
     languageSwitcher: document.getElementById("languageSwitcher"),
     languageControl: document.getElementById("languageControl"),
     languageButtons: Array.from(document.querySelectorAll("[data-language-mode]")),
@@ -283,6 +304,313 @@
       .replace(/'/g, "&#039;");
   }
 
+  const searchKindLabels = {
+    chip: "芯片",
+    page: "分类",
+    register: "寄存器",
+    field: "位域",
+    enum: "枚举",
+    note: "备注",
+  };
+
+  function highlightSearchMatch(value, query = state.searchQuery) {
+    const source = String(value || "");
+    if (!query) return escapeHtml(source);
+    const expression = new RegExp(`(${String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig");
+    return source.split(expression).map((part, index) => index % 2 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)).join("");
+  }
+
+  function inlineWorkerUrl(source) {
+    if (window.location.protocol !== "file:") {
+      const blobUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      return { workerUrl: blobUrl, blobUrl };
+    }
+    const bytes = new TextEncoder().encode(source);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return { workerUrl: `data:text/javascript;base64,${btoa(binary)}`, blobUrl: "" };
+  }
+
+  function setSearchLoading(loading) {
+    state.searchLoading = loading;
+    els.searchActivity.hidden = !loading;
+  }
+
+  function openSearchPanel() {
+    if (!state.searchQuery) return;
+    state.searchOpen = true;
+    els.searchPanel.hidden = false;
+    els.searchInput.setAttribute("aria-expanded", "true");
+  }
+
+  function closeSearchPanel({ clear = false, restoreFocus = false } = {}) {
+    state.searchOpen = false;
+    els.searchPanel.hidden = true;
+    els.searchInput.setAttribute("aria-expanded", "false");
+    els.searchInput.removeAttribute("aria-activedescendant");
+    if (clear) {
+      state.searchQuery = "";
+      state.searchResults = [];
+      state.searchActiveIndex = -1;
+      els.searchInput.value = "";
+    }
+    if (restoreFocus) els.searchInput.focus();
+  }
+
+  function renderSearchResults() {
+    const results = state.searchResults;
+    const query = state.searchQuery;
+    els.searchSummary.textContent = state.searchLoading
+      ? `正在搜索“${query}”...`
+      : `${results.length} 个全库结果${results.length >= 100 ? " · 已显示前 100 项" : ""}`;
+    if (!results.length) {
+      els.searchResults.innerHTML = `<div class="search-empty">${state.searchLoading ? "正在检索寄存器、位域与说明" : `没有找到“${escapeHtml(query)}”，可尝试缩短名称或改用说明中的词语`}</div>`;
+      return;
+    }
+    els.searchResults.innerHTML = results.map((result, index) => {
+      const active = index === state.searchActiveIndex;
+      const field = result.fieldName ? ` · ${result.fieldName}${result.fieldBits ? `[${result.fieldBits}]` : ""}` : "";
+      const register = result.registerName ? ` · ${result.registerName}` : "";
+      const path = [result.chipName, result.pageName].filter(Boolean).join(" / ") + register + field;
+      const locator = result.registerLocator ? `<code>${escapeHtml(result.registerLocator)}</code>` : "";
+      return `
+        <button id="search-result-${index}" class="search-result ${active ? "active" : ""}" type="button" role="option"
+          aria-selected="${active}" data-search-index="${index}" data-kind="${escapeHtml(result.kind)}">
+          <span class="search-result-kind">${escapeHtml(searchKindLabels[result.kind] || result.kind)}</span>
+          <span class="search-result-main">
+            <span class="search-result-title">${highlightSearchMatch(result.title || result.registerName || result.chipName)}</span>
+            <span class="search-result-path">${escapeHtml(path)}</span>
+          </span>
+          <span class="search-result-meta">
+            ${locator}
+            ${result.matchLanguage === "zh-CN" ? `<span class="search-result-language">中文</span>` : result.matchLanguage === "source" ? `<span class="search-result-language">EN</span>` : ""}
+            ${result.enabled ? "" : `<span class="search-result-hidden">已隐藏</span>`}
+          </span>
+          <span class="search-result-snippet">${highlightSearchMatch(result.snippet)}</span>
+        </button>
+      `;
+    }).join("");
+    if (state.searchActiveIndex >= 0) {
+      const activeId = `search-result-${state.searchActiveIndex}`;
+      els.searchInput.setAttribute("aria-activedescendant", activeId);
+      document.getElementById(activeId)?.scrollIntoView({ block: "nearest" });
+    } else {
+      els.searchInput.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function acceptSearchResults(requestId, results) {
+    if (requestId !== state.searchRequestId) return;
+    const hadFallbackFilter = state.searchFallbackFiltering;
+    state.searchFallbackFiltering = false;
+    state.query = "";
+    state.searchResults = Array.isArray(results) ? results : [];
+    state.searchActiveIndex = state.searchResults.length ? 0 : -1;
+    setSearchLoading(false);
+    openSearchPanel();
+    if (hadFallbackFilter) render();
+    renderSearchResults();
+  }
+
+  async function initializeSearchWorker() {
+    if (isDesktopApp() || searchWorker) return;
+    let source = window.REGISTER_SEARCH_WORKER_SOURCE || "";
+    let workerUrl;
+    let blobUrl = "";
+    if (source) {
+      ({ workerUrl, blobUrl } = inlineWorkerUrl(source));
+    } else {
+      workerUrl = new URL("search-worker.js", document.baseURI).href;
+    }
+    searchWorker = new Worker(workerUrl);
+    searchWorkerBlobUrl = blobUrl;
+    searchWorker.addEventListener("message", (event) => {
+      if (searchWorkerBlobUrl) {
+        URL.revokeObjectURL(searchWorkerBlobUrl);
+        searchWorkerBlobUrl = "";
+      }
+      const message = event.data || {};
+      if (message.type === "ready") {
+        state.searchIndexReady = true;
+        if (state.searchQuery) scheduleSearch(true);
+      } else if (message.type === "results") {
+        acceptSearchResults(message.requestId, message.results);
+      }
+    });
+    searchWorker.addEventListener("error", () => {
+      if (searchWorkerBlobUrl) URL.revokeObjectURL(searchWorkerBlobUrl);
+      searchWorkerBlobUrl = "";
+      state.searchIndexReady = false;
+    });
+    refreshBrowserSearchIndex();
+  }
+
+  function initializeImportWorker() {
+    if (isDesktopApp() || importWorker) return importWorker;
+    const source = window.REGISTER_IMPORT_WORKER_SOURCE || "";
+    let workerUrl;
+    let blobUrl = "";
+    if (source) {
+      ({ workerUrl, blobUrl } = inlineWorkerUrl(source));
+    } else {
+      workerUrl = new URL("import-worker.js", document.baseURI).href;
+    }
+    importWorker = new Worker(workerUrl);
+    importWorkerBlobUrl = blobUrl;
+    importWorker.addEventListener("message", (event) => {
+      if (importWorkerBlobUrl) {
+        URL.revokeObjectURL(importWorkerBlobUrl);
+        importWorkerBlobUrl = "";
+      }
+      const message = event.data || {};
+      const request = importRequests.get(message.requestId);
+      if (!request) return;
+      importRequests.delete(message.requestId);
+      if (message.type === "import-results") request.resolve(message.result);
+      else request.reject(new Error(message.error || "YAML 后台解析失败"));
+    });
+    importWorker.addEventListener("error", (event) => {
+      if (importWorkerBlobUrl) URL.revokeObjectURL(importWorkerBlobUrl);
+      importWorkerBlobUrl = "";
+      const error = new Error(event.message || "YAML 后台解析失败");
+      for (const request of importRequests.values()) request.reject(error);
+      importRequests.clear();
+      importWorker?.terminate();
+      importWorker = null;
+    });
+    return importWorker;
+  }
+
+  function readBrowserFileText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error(`无法读取 ${file.name}`));
+      reader.readAsText(file, "utf-8");
+    });
+  }
+
+  async function parseBrowserImportFiles(files) {
+    const worker = initializeImportWorker();
+    if (!worker) return Promise.reject(new Error("当前浏览器不支持 YAML 后台解析"));
+    const requestId = ++importRequestId;
+    const fileEntries = await Promise.all(files.map(async (file) => ({
+      fileName: file.name,
+      sourceName: file.webkitRelativePath || file.name,
+      text: await readBrowserFileText(file),
+    })));
+    const existingSources = libraryRecords.map((record) => {
+      const chip = record.chipData || chips.find((item) => getNavigationChipId(item) === record.id);
+      return {
+        sourceSha256: record.sourceSha256 || chip?._sourceSha256 || "",
+        text: record.yamlText || "",
+        data: chip && !chip._loading ? chip : null,
+      };
+    }).filter((source) => source.sourceSha256 && source.data);
+    return new Promise((resolve, reject) => {
+      importRequests.set(requestId, { resolve, reject });
+      worker.postMessage({
+        type: "parse-import",
+        requestId,
+        files: fileEntries,
+        existingSources,
+      });
+    });
+  }
+
+  function refreshBrowserSearchIndex() {
+    if (!searchWorker) return;
+    state.searchIndexReady = false;
+    const indexedChips = libraryRecords.map((record) => {
+      try {
+        return recordToChip(record);
+      } catch (_error) {
+        return null;
+      }
+    }).filter(Boolean);
+    searchWorker.postMessage({ type: "init", chips: indexedChips, summaries: libraryRecords });
+  }
+
+  async function initializeDesktopSearchIndex() {
+    if (!isDesktopApp()) return;
+    let status;
+    try {
+      status = await getInvoke()("search_index_status");
+    } catch (_error) {
+      // Older test doubles and pre-upgrade development builds have no index API.
+      state.searchIndexReady = true;
+      return;
+    }
+    state.searchIndexReady = Boolean(status.ready);
+    if (status.ready) return;
+    state.loadMessage = `正在建立全库搜索索引 ${status.indexedChips}/${status.totalChips}`;
+    render();
+    try {
+      await getInvoke()("rebuild_search_index");
+      state.searchIndexReady = true;
+      state.loadMessage = "全库搜索索引已就绪";
+    } catch (error) {
+      state.loadMessage = `搜索索引建立失败：${errorMessage(error)}`;
+    }
+    render();
+    if (state.searchQuery) scheduleSearch(true);
+  }
+
+  async function runSearch(requestId, query) {
+    if (!query || !state.searchIndexReady) {
+      if (requestId === state.searchRequestId) {
+        state.searchResults = [];
+        setSearchLoading(Boolean(query && !state.searchIndexReady));
+        openSearchPanel();
+        renderSearchResults();
+      }
+      return;
+    }
+    if (isDesktopApp()) {
+      try {
+        const results = await getInvoke()("search_registers", {
+          query,
+          currentChipId: getNavigationChipId(),
+          limit: 100,
+        });
+        acceptSearchResults(requestId, results);
+      } catch (error) {
+        if (requestId !== state.searchRequestId) return;
+        state.searchResults = [];
+        state.searchFallbackFiltering = true;
+        state.query = query.toLowerCase();
+        setSearchLoading(false);
+        openSearchPanel();
+        render();
+        els.searchSummary.textContent = "搜索失败";
+        els.searchResults.innerHTML = `<div class="search-empty">全库索引暂不可用，已使用当前视图快速筛选<br><small>${escapeHtml(errorMessage(error))}</small></div>`;
+      }
+      return;
+    }
+    searchWorker?.postMessage({ type: "search", requestId, query, currentChipId: getNavigationChipId(), limit: 100 });
+  }
+
+  function scheduleSearch(immediate = false) {
+    window.clearTimeout(searchDebounceTimer);
+    const query = state.searchQuery.trim();
+    const requestId = ++state.searchRequestId;
+    if (!query) {
+      const hadFilter = state.searchFallbackFiltering && Boolean(state.query);
+      state.searchFallbackFiltering = false;
+      state.query = "";
+      setSearchLoading(false);
+      closeSearchPanel();
+      if (hadFilter) render();
+      return;
+    }
+    setSearchLoading(true);
+    openSearchPanel();
+    renderSearchResults();
+    searchDebounceTimer = window.setTimeout(() => runSearch(requestId, query), immediate ? 0 : 120);
+  }
+
   function normalizeLanguageMode(value) {
     return ["zh", "bilingual", "en"].includes(value) ? value : "bilingual";
   }
@@ -314,6 +642,24 @@
 
   function translationDocumentFromRecord(record) {
     if (window.isRegisterTranslationDocument?.(record?.translationData)) return record.translationData;
+    if (record && !record.yamlText && record.locale) {
+      return {
+        format: "register-reference-translation",
+        locale: record.locale,
+        metadata: {
+          locale: record.locale,
+          status: record.status || "draft",
+          coverage: record.coverage || "partial",
+          method: record.method || "",
+          translator: record.translator || "",
+          updated: record.updated || "",
+        },
+        translations: {
+          sensor: record.translatedSensor || "",
+          family: record.translatedFamily || "",
+        },
+      };
+    }
     if (record?._translationParsed) return record._translationDocument || null;
     if (!record?.yamlText) return null;
     try {
@@ -541,9 +887,11 @@
       chipIndex: state.chipIndex,
       pageName: state.pageName,
       view: state.view,
-      query: state.query,
+      query: "",
+      searchQuery: state.searchQuery,
       scrollY: Math.max(0, Math.round(window.scrollY)),
       focusIdentity: "",
+      searchTarget: null,
       fromSystemOverview: false,
       ...overrides,
     };
@@ -579,17 +927,96 @@
     window.setTimeout(() => row.classList.remove("is-target"), 1800);
   }
 
-  function restoreNavigationState(navigation) {
+  function revealSearchTarget(result, { focus = false } = {}) {
+    if (!result?.registerName && !Number.isInteger(result?.registerIndex)) return;
+    const sourceRegisters = getPages(getChip())?.[result.pageName]?.registers || [];
+    const source = Number.isInteger(result.registerIndex) ? sourceRegisters[result.registerIndex] : null;
+    const displayed = getDisplayRegisters().find((register) =>
+      register._sourceRegisterIndex === result.registerIndex
+      || (register.name === result.registerName && (!source || Number(register.addr) === Number(source.addr))),
+    );
+    if (!displayed) return;
+    const key = getRegisterKey(displayed);
+    const row = Array.from(els.tableBody.querySelectorAll(".register-display"))
+      .find((item) => item.dataset.registerKey === key);
+    if (!row) return;
+    row.classList.add("is-target");
+    row.tabIndex = -1;
+    let target = row;
+    if (result.fieldName) {
+      const field = Array.from(row.querySelectorAll(".field-row")).find((item) =>
+        item.dataset.fieldName === result.fieldName && (!result.fieldBits || item.dataset.fieldBits === String(result.fieldBits)),
+      );
+      if (field) {
+        field.classList.add("is-search-target");
+        target = field;
+        window.setTimeout(() => field.classList.remove("is-search-target"), 1800);
+      }
+    }
+    target.scrollIntoView({ block: "center" });
+    if (focus) row.focus({ preventScroll: true });
+    window.setTimeout(() => row.classList.remove("is-target"), 1800);
+  }
+
+  async function openSearchResult(result, { focus = false } = {}) {
+    if (!result) return;
+    replaceNavigationState({ searchQuery: state.searchQuery, scrollY: window.scrollY });
+    closeSearchPanel();
+    const record = libraryRecords.find((item) => item.id === result.chipId);
+    if (!record) return;
+    let chipIndex = chips.findIndex((chip) => getNavigationChipId(chip) === result.chipId);
+    if (chipIndex < 0) {
+      const temporary = recordToChip(record);
+      temporary._temporaryHidden = !record.enabled;
+      chips.push(temporary);
+      chipIndex = chips.length - 1;
+    }
+    state.chipIndex = chipIndex;
+    state.pageName = result.pageName || "";
+    state.view = result.kind === "chip" ? "matrix" : "table";
+    state.query = "";
+    await ensureChipLoaded(result.chipId);
+    const loaded = chips[chipIndex];
+    if (loaded && !record.enabled) loaded._temporaryHidden = true;
+    populateChipSelect();
+    populatePageSelect();
+    pushNavigationState({
+      chipId: result.chipId,
+      chipIndex,
+      pageName: state.pageName,
+      view: state.view,
+      searchQuery: state.searchQuery,
+      searchTarget: result,
+      scrollY: 0,
+    });
+    render();
+    window.requestAnimationFrame(() => {
+      if (result.kind === "chip") window.scrollTo({ top: 0, behavior: "auto" });
+      else revealSearchTarget(result, { focus });
+    });
+  }
+
+  async function restoreNavigationState(navigation) {
     if (!isAppNavigationState(navigation)) return;
 
-    const chipIndex = chips.findIndex((chip) => getNavigationChipId(chip) === navigation.chipId);
+    let chipIndex = chips.findIndex((chip) => getNavigationChipId(chip) === navigation.chipId);
+    if (chipIndex < 0) {
+      const record = libraryRecords.find((item) => item.id === navigation.chipId);
+      if (record) {
+        chips.push(recordToChip(record));
+        chipIndex = chips.length - 1;
+      }
+    }
     if (chipIndex >= 0) state.chipIndex = chipIndex;
     else if (Number.isInteger(navigation.chipIndex) && chips[navigation.chipIndex]) state.chipIndex = navigation.chipIndex;
 
     state.pageName = String(navigation.pageName || "");
     state.view = navigation.view === "table" ? "table" : "matrix";
-    state.query = String(navigation.query || "");
-    els.searchInput.value = state.query;
+    state.query = "";
+    state.searchQuery = String(navigation.searchQuery || navigation.query || "");
+    els.searchInput.value = state.searchQuery;
+    closeSearchPanel();
+    await ensureChipLoaded(navigation.chipId);
     populateChipSelect();
     populatePageSelect();
     render();
@@ -598,6 +1025,10 @@
     window.requestAnimationFrame(() => {
       if (state.view === "table" && navigation.focusIdentity) {
         revealSystemRegister(navigation.focusIdentity);
+        return;
+      }
+      if (state.view === "table" && navigation.searchTarget) {
+        revealSearchTarget(navigation.searchTarget);
         return;
       }
       window.scrollTo({ top: Math.max(0, Number(navigation.scrollY) || 0), left: 0, behavior: "auto" });
@@ -2097,6 +2528,7 @@
       reg.alias_note,
       ...(reg.fields || []).flatMap((field) => [
         field.name, field.bits, field.access, field.reset, field.reset_info, field.condition, field.reserved, field.desc,
+        ...getFieldEnumEntries(field).flatMap((item) => [item.label, item.desc, item.condition]),
       ]),
       ...((registerTranslation?.fields || []).flatMap((field) => [
         field.desc,
@@ -2465,7 +2897,7 @@
           ? `<div class="field-desc"><strong>Access:</strong> ${field.access_rules.map((rule) => escapeHtml(rule.condition ? `${rule.access} · ${rule.condition}` : rule.access)).join("<br>")}</div>`
           : "";
         return `
-          <div class="field-row ${isSet ? "is-set" : ""}">
+          <div class="field-row ${isSet ? "is-set" : ""}" data-field-name="${escapeHtml(field.name || "")}" data-field-bits="${escapeHtml(String(field.bits ?? ""))}">
             <div class="field-name">${escapeHtml(field.name)} ${fieldAccess}</div>
             <div class="field-bits">[${escapeHtml(field.bits)}]${fieldReset ? `<br>reset ${escapeHtml(fieldReset)}` : ""}</div>
             <div class="field-value">${escapeHtml(valueLabel)}</div>
@@ -2881,13 +3313,25 @@
   }
 
   function recordToChip(record) {
-    let chip;
+    const cached = chipDocumentCache.get(record.id);
+    if (cached && cached.sourceSha256 === (record.sourceSha256 || "")) return cached.chip;
+    let chip = null;
     if (record.chipData) {
       chip = record.chipData;
-    } else {
+    } else if (record.yamlText) {
       const data = window.parseRegisterYaml(record.yamlText);
       window.assertRegisterYaml(record.yamlText, data);
       chip = normalizeLoadedChip(data, record.sourceName);
+    }
+    if (!chip) {
+      chip = {
+        sensor: record.sensor || record.id,
+        vendor: record.vendor || "",
+        family: record.family || "",
+        device_type: record.deviceType || "",
+        pages: {},
+        _loading: true,
+      };
     }
     chip._id = record.id;
     chip._libraryId = record.id;
@@ -2897,13 +3341,74 @@
     chip._builtin = Boolean(record.builtin);
     chip._notes = Array.isArray(record.notes) ? record.notes : Array.isArray(chip._notes) ? chip._notes : [];
     chip._attachments = Array.isArray(record.attachments) ? record.attachments : [];
-    chip._translations = Array.isArray(record.translations)
-      ? record.translations.map(translationDocumentFromRecord).filter(Boolean)
-      : Array.isArray(chip._translations) ? chip._translations : [];
+    if (!chip._loading) {
+      chip._translations = Array.isArray(chip._translations) ? chip._translations : [];
+      chipDocumentCache.set(record.id, { sourceSha256: record.sourceSha256 || "", chip });
+    }
     return chip;
   }
 
-  function applyLibraryRecords(records) {
+  async function loadRecordChip(record) {
+    const cached = chipDocumentCache.get(record.id);
+    if (cached && cached.sourceSha256 === (record.sourceSha256 || "")) return cached.chip;
+    if (!isDesktopApp()) return recordToChip(record);
+    let document;
+    try {
+      document = await getInvoke()("load_chip_document", { chipId: record.id });
+    } catch (error) {
+      if (!record.yamlText) throw error;
+      return recordToChip(record);
+    }
+    const chip = normalizeLoadedChip(document.chipData, record.sourceName);
+    chip._translations = Array.isArray(document.translations) ? document.translations : [];
+    chip._loading = false;
+    chip._id = record.id;
+    chip._libraryId = record.id;
+    chip._source = record.sourceName;
+    chip._sourceSha256 = record.sourceSha256 || "";
+    chip._category = record.category || fallbackCategory(record);
+    chip._builtin = Boolean(record.builtin);
+    chip._notes = Array.isArray(record.notes) ? record.notes : [];
+    chip._attachments = Array.isArray(record.attachments) ? record.attachments : [];
+    chipDocumentCache.set(record.id, { sourceSha256: record.sourceSha256 || "", chip });
+    return chip;
+  }
+
+  async function ensureChipLoaded(chipId = getNavigationChipId()) {
+    const record = libraryRecords.find((item) => item.id === chipId);
+    if (!record) return null;
+    let chipIndex = chips.findIndex((chip) => getNavigationChipId(chip) === chipId);
+    if (chipIndex < 0) {
+      chips.push(recordToChip(record));
+      chipIndex = chips.length - 1;
+    }
+    const existing = chips[chipIndex];
+    if (!existing?._loading) return existing;
+    const requestedHash = record.sourceSha256 || "";
+    existing._loadingPromise ||= loadRecordChip(record);
+    try {
+      const loaded = await existing._loadingPromise;
+      const latestRecord = libraryRecords.find((item) => item.id === chipId);
+      if (!latestRecord || (latestRecord.sourceSha256 || "") !== requestedHash) return null;
+      chips[chipIndex] = loaded;
+      if (state.chipIndex === chipIndex) {
+        populateChipSelect();
+        populatePageSelect();
+        render();
+      }
+      return loaded;
+    } catch (error) {
+      existing._loadingPromise = null;
+      existing._loadError = errorMessage(error);
+      if (state.chipIndex === chipIndex) {
+        state.loadMessage = `${record.sourceName} 加载失败：${existing._loadError}`;
+        render();
+      }
+      throw error;
+    }
+  }
+
+  async function applyLibraryRecords(records) {
     const previousChipId = getChip()?._libraryId || getChip()?._id || "";
     libraryRecords = Array.isArray(records) ? records : [];
     const currentIds = new Set(libraryRecords.map((record) => record.id));
@@ -2911,6 +3416,10 @@
       if (!currentIds.has(id)) state.librarySelection.delete(id);
     });
 
+    for (const record of libraryRecords) {
+      const cached = chipDocumentCache.get(record.id);
+      if (cached && cached.sourceSha256 !== (record.sourceSha256 || "")) chipDocumentCache.delete(record.id);
+    }
     const loaded = [];
     const failures = [];
     for (const record of libraryRecords.filter((item) => item.enabled)) {
@@ -2931,6 +3440,8 @@
     }
     render();
     if (state.libraryOpen) renderLibraryList();
+    refreshBrowserSearchIndex();
+    if (chips.length) await ensureChipLoaded(getNavigationChipId());
   }
 
   function createStaticLibraryRecords() {
@@ -2963,11 +3474,22 @@
 
   async function initializeLibrary() {
     if (isDesktopApp()) {
-      const records = await getInvoke()("list_chips");
-      applyLibraryRecords(records);
+      const records = await getLibrarySummaries();
+      await applyLibraryRecords(records);
       return;
     }
-    applyLibraryRecords(createStaticLibraryRecords());
+    await applyLibraryRecords(createStaticLibraryRecords());
+  }
+
+  async function getLibrarySummaries() {
+    if (!isDesktopApp()) return libraryRecords;
+    try {
+      return await getInvoke()("list_chip_summaries");
+    } catch (error) {
+      const legacy = await getInvoke()("list_chips");
+      if (!Array.isArray(legacy)) throw error;
+      return legacy;
+    }
   }
 
   function setLibraryStatus(message, isError = false) {
@@ -3441,7 +3963,7 @@
       .map(
         ([category, items]) => `
           <optgroup label="${escapeHtml(category)}">
-            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(localizedLabel(chip.sensor || chip._id || `Chip ${index + 1}`, getTranslationRoot(chip)?.sensor))}</option>`).join("")}
+            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(localizedLabel(chip.sensor || chip._id || `Chip ${index + 1}`, getTranslationRoot(chip)?.sensor))}${chip._temporaryHidden ? "（临时查看）" : ""}</option>`).join("")}
           </optgroup>
         `,
       )
@@ -3483,16 +4005,19 @@
     return chips.length - 1;
   }
 
-  function readFileText(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(reader.error || new Error(`无法读取 ${file.name}`));
-      reader.readAsText(file, "utf-8");
-    });
-  }
-
   async function loadYamlFiles(fileList) {
+    if (isDesktopApp()) {
+      setLibraryStatus("正在选择 YAML / 译文...", false);
+      try {
+        const report = await getInvoke()("import_yaml_files", { category: null });
+        await applyDesktopImportReport(report, "文件导入");
+      } catch (error) {
+        const message = errorMessage(error);
+        setLibraryStatus(message, true);
+        showImportFailures("文件导入失败", "所选文件未能完成导入。", [message]);
+      }
+      return;
+    }
     const files = Array.from(fileList || []).filter((file) => /\.(ya?ml)$/i.test(file.name));
     if (!files.length) {
       state.loadMessage = "未选择 YAML 文件";
@@ -3500,42 +4025,32 @@
       return;
     }
 
-    if (typeof window.parseRegisterYaml !== "function" || typeof window.assertRegisterYaml !== "function") {
-      state.loadMessage = "YAML 解析或规范校验器未加载";
+    let parsed;
+    try {
+      state.loadMessage = `正在后台解析 ${files.length} 个 YAML 文件...`;
       render();
+      parsed = await parseBrowserImportFiles(files);
+    } catch (error) {
+      state.loadMessage = errorMessage(error);
+      render();
+      showImportFailures("YAML 未导入", "后台解析任务失败。", [state.loadMessage]);
       return;
     }
-
-    const failures = [];
-    const sources = [];
-    const translations = [];
-    for (const file of files) {
-      try {
-        const text = await readFileText(file);
-        const sourceName = file.webkitRelativePath || file.name;
-        const data = window.parseRegisterYaml(text);
-        const item = { file, text, sourceName, data };
-        if (window.isRegisterTranslationDocument?.(data)) translations.push(item);
-        else sources.push(item);
-      } catch (error) {
-        failures.push(`${file.name}: ${errorMessage(error)}`);
-      }
-    }
+    const failures = Array.isArray(parsed.failures) ? [...parsed.failures] : [];
+    const sources = Array.isArray(parsed.sources) ? parsed.sources : [];
+    const translations = Array.isArray(parsed.translations) ? parsed.translations : [];
 
     let selectedIndex = state.chipIndex;
     let selectedSourceSha256 = "";
     let desktopRecords = null;
     let loaded = 0;
     let translated = 0;
-    const sourceContexts = [];
 
     for (const item of sources) {
       try {
-        window.assertRegisterYaml(item.text, item.data);
-        const sourceSha256 = await window.sha256RegisterYaml(item.text);
+        const sourceSha256 = item.sourceSha256;
         const chip = normalizeLoadedChip(item.data, item.sourceName);
         chip._sourceSha256 = sourceSha256;
-        sourceContexts.push({ sourceSha256, text: item.text, data: item.data, chip });
         selectedSourceSha256 = sourceSha256;
         if (isDesktopApp()) {
           desktopRecords = await getInvoke()("import_yaml", {
@@ -3574,26 +4089,13 @@
         }
         loaded += 1;
       } catch (error) {
-        failures.push(`${item.file.name}: ${errorMessage(error)}`);
+        failures.push(`${item.fileName}: ${errorMessage(error)}`);
       }
     }
 
-    const availableRecords = desktopRecords || libraryRecords;
     for (const item of translations) {
       try {
-        if (typeof window.assertRegisterTranslationYaml !== "function") {
-          throw new Error("翻译 YAML 校验器未加载");
-        }
-        const sourceSha256 = String(item.data.source_sha256 || "");
-        const pendingSource = sourceContexts.find((source) => source.sourceSha256 === sourceSha256);
-        const sourceRecord = availableRecords.find((record) => record.sourceSha256 === sourceSha256);
-        const sourceText = pendingSource?.text || sourceRecord?.yamlText || "";
-        const sourceData = pendingSource?.data || sourceRecord?.chipData
-          || (sourceText ? window.parseRegisterYaml(sourceText) : null);
-        if (!sourceText || !sourceData) {
-          throw new Error("找不到与 source_sha256 匹配的英文源 YAML；请先导入对应英文寄存器文件");
-        }
-        await window.assertRegisterTranslationYaml(item.text, item.data, sourceText, sourceData);
+        const sourceSha256 = item.sourceSha256;
         selectedSourceSha256 = sourceSha256;
         if (isDesktopApp()) {
           desktopRecords = await getInvoke()("import_translation", {
@@ -3621,7 +4123,7 @@
         }
         translated += 1;
       } catch (error) {
-        failures.push(`${item.file.name}: ${errorMessage(error)}`);
+        failures.push(`${item.fileName}: ${errorMessage(error)}`);
       }
     }
 
@@ -3640,6 +4142,7 @@
     populateChipSelect();
     populatePageSelect();
     render();
+    refreshBrowserSearchIndex();
     if (state.libraryOpen) {
       setLibraryStatus(state.loadMessage, failures.length > 0);
       renderLibraryList();
@@ -3650,6 +4153,45 @@
         loaded || translated ? `部分${failureKind}未导入` : `${failureKind} 未导入`,
         `已接受 ${loaded + translated} 个，拒绝 ${failures.length} 个。请修正规范问题后重新导入。`,
         failures,
+      );
+    }
+  }
+
+  async function applyDesktopImportReport(report, label) {
+    if (report.canceled) {
+      setLibraryStatus("已取消导入");
+      return;
+    }
+    for (const chipId of report.changedChipIds || []) chipDocumentCache.delete(chipId);
+    const records = await getLibrarySummaries();
+    await applyLibraryRecords(records);
+    if (report.changedChipIds?.length) {
+      const targetId = report.changedChipIds[report.changedChipIds.length - 1];
+      const targetIndex = chips.findIndex((chip) => getNavigationChipId(chip) === targetId);
+      if (targetIndex >= 0) {
+        state.chipIndex = targetIndex;
+        await ensureChipLoaded(targetId);
+        populateChipSelect();
+        populatePageSelect();
+        render();
+      }
+    }
+    const accepted = [
+      report.imported ? `${report.imported} 个寄存器 YAML` : "",
+      report.translations ? `${report.translations} 个译文` : "",
+      report.skipped ? `${report.skipped} 个未变化` : "",
+    ].filter(Boolean).join("、") || "0 个文件";
+    state.loadMessage = report.failures?.length
+      ? `${label} ${accepted}，失败 ${report.failures.length} 个`
+      : `${label} ${accepted}`;
+    setLibraryStatus(state.loadMessage, Boolean(report.failures?.length));
+    render();
+    if (state.libraryOpen) renderLibraryList();
+    if (report.failures?.length) {
+      showImportFailures(
+        `部分文件未导入`,
+        `已接受 ${Number(report.imported || 0) + Number(report.translations || 0)} 个，拒绝 ${report.failures.length} 个。`,
+        report.failures,
       );
     }
   }
@@ -3669,27 +4211,7 @@
         if (state.libraryOpen) renderLibraryList();
         return;
       }
-      const records = await getInvoke()("list_chips");
-      const accepted = [
-        report.imported ? `${report.imported} 个寄存器 YAML` : "",
-        report.translations ? `${report.translations} 个译文` : "",
-      ].filter(Boolean).join("、") || "0 个文件";
-      state.loadMessage = report.failures.length
-        ? `目录导入 ${accepted}，失败 ${report.failures.length} 个`
-        : `目录导入 ${accepted}`;
-      applyLibraryRecords(records);
-      if (getTranslationDocument()) {
-        state.translationNotice = "";
-        render();
-      }
-      setLibraryStatus(state.loadMessage, report.failures.length > 0);
-      if (report.failures.length) {
-        showImportFailures(
-          "部分 YAML 未导入",
-          `目录中已接受 ${report.imported + (report.translations || 0)} 个，拒绝 ${report.failures.length} 个。`,
-          report.failures,
-        );
-      }
+      await applyDesktopImportReport(report, "目录导入");
     } catch (error) {
       const message = errorMessage(error);
       setLibraryStatus(message, true);
@@ -3719,7 +4241,7 @@
         if (isDesktopApp()) {
           await getInvoke()("set_chip_enabled", { chipId: record.id, enabled: record.enabled });
         }
-        applyLibraryRecords(libraryRecords);
+        await applyLibraryRecords(libraryRecords);
         setLibraryStatus(`${record.sensor} 已${record.enabled ? "显示" : "隐藏"}`);
       } else if (action === "category") {
         const category = control.value.trim();
@@ -3728,15 +4250,15 @@
         if (isDesktopApp()) {
           await getInvoke()("set_chip_category", { chipId: record.id, category });
         }
-        applyLibraryRecords(libraryRecords);
+        await applyLibraryRecords(libraryRecords);
         setLibraryStatus(`${record.sensor} 已归入 ${category}`);
       }
       renderLibraryList();
     } catch (error) {
       setLibraryStatus(error.message || String(error), true);
       if (isDesktopApp()) {
-        const records = await getInvoke()("list_chips");
-        applyLibraryRecords(records);
+        const records = await getLibrarySummaries();
+        await applyLibraryRecords(records);
       }
       renderLibraryList();
     }
@@ -3784,9 +4306,9 @@
     try {
       if (isDesktopApp()) {
         for (const chipId of ids) await getInvoke()("delete_chip", { chipId });
-        applyLibraryRecords(await getInvoke()("list_chips"));
+        await applyLibraryRecords(await getLibrarySummaries());
       } else {
-        applyLibraryRecords(libraryRecords.filter((record) => !ids.includes(record.id)));
+        await applyLibraryRecords(libraryRecords.filter((record) => !ids.includes(record.id)));
       }
       ids.forEach((id) => state.librarySelection.delete(id));
       closeLibraryRemoveDialog();
@@ -3795,7 +4317,7 @@
     } catch (error) {
       setLibraryStatus(error.message || String(error), true);
       closeLibraryRemoveDialog();
-      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      if (isDesktopApp()) await applyLibraryRecords(await getLibrarySummaries());
       renderLibraryList();
     } finally {
       els.libraryRemoveConfirmButton.disabled = false;
@@ -3813,12 +4335,12 @@
           await getInvoke()("set_chip_enabled", { chipId: record.id, enabled });
         }
       }
-      applyLibraryRecords(isDesktopApp() ? await getInvoke()("list_chips") : libraryRecords);
+      await applyLibraryRecords(isDesktopApp() ? await getLibrarySummaries() : libraryRecords);
       setLibraryStatus(`${selected.length} 个芯片已${enabled ? "显示" : "隐藏"}`);
       renderLibraryList();
     } catch (error) {
       setLibraryStatus(error.message || String(error), true);
-      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      if (isDesktopApp()) await applyLibraryRecords(await getLibrarySummaries());
       renderLibraryList();
     }
   }
@@ -3839,13 +4361,13 @@
           await getInvoke()("set_chip_category", { chipId: record.id, category });
         }
       }
-      applyLibraryRecords(isDesktopApp() ? await getInvoke()("list_chips") : libraryRecords);
+      await applyLibraryRecords(isDesktopApp() ? await getLibrarySummaries() : libraryRecords);
       els.libraryBatchCategory.value = "";
       setLibraryStatus(`${selected.length} 个芯片已归入 ${category}`);
       renderLibraryList();
     } catch (error) {
       setLibraryStatus(error.message || String(error), true);
-      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      if (isDesktopApp()) await applyLibraryRecords(await getLibrarySummaries());
       renderLibraryList();
     }
   }
@@ -3990,7 +4512,8 @@
 
     els.loadYamlButton.addEventListener("click", () => {
       closeToolsMenu(false);
-      els.yamlFileInput.click();
+      if (isDesktopApp()) loadYamlFiles([]);
+      else els.yamlFileInput.click();
     });
 
     els.loadFolderButton.addEventListener("click", () => {
@@ -4202,7 +4725,7 @@
       els.yamlFolderInput.value = "";
     });
 
-    els.chipSelect.addEventListener("change", () => {
+    els.chipSelect.addEventListener("change", async () => {
       closeNoteDialog();
       closeAttachmentsDialog();
       state.chipIndex = Number(els.chipSelect.value);
@@ -4210,6 +4733,12 @@
       state.translationNotice = "";
       populatePageSelect();
       render();
+      try {
+        await ensureChipLoaded(getNavigationChipId());
+      } catch (_error) {
+        // The loader has already placed the actionable message in the status band.
+      }
+      refreshBrowserSearchIndex();
     });
 
     els.pageSelect.addEventListener("change", () => {
@@ -4226,8 +4755,34 @@
     });
 
     els.searchInput.addEventListener("input", () => {
-      state.query = els.searchInput.value.trim().toLowerCase();
-      render();
+      state.searchQuery = els.searchInput.value.trim();
+      scheduleSearch();
+    });
+    els.searchInput.addEventListener("focus", () => {
+      if (state.searchQuery) openSearchPanel();
+    });
+    els.searchInput.addEventListener("keydown", (event) => {
+      if (!state.searchOpen || !state.searchResults.length) {
+        if (event.key === "Escape") closeSearchPanel();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        state.searchActiveIndex = (state.searchActiveIndex + direction + state.searchResults.length) % state.searchResults.length;
+        renderSearchResults();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        openSearchResult(state.searchResults[state.searchActiveIndex >= 0 ? state.searchActiveIndex : 0], { focus: true });
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        closeSearchPanel({ restoreFocus: true });
+      }
+    });
+    els.searchResults.addEventListener("click", (event) => {
+      const result = event.target.closest("[data-search-index]");
+      if (!result) return;
+      openSearchResult(state.searchResults[Number(result.dataset.searchIndex)]);
     });
 
     els.languageControl.addEventListener("click", (event) => {
@@ -4290,6 +4845,7 @@
     });
 
     document.addEventListener("click", (event) => {
+      if (state.searchOpen && !els.searchControl.contains(event.target)) closeSearchPanel();
       if (els.hoverPanel.hidden) return;
       if (els.hoverPanel.contains(event.target)) return;
       if (els.radixDialog.contains(event.target)) return;
@@ -4300,6 +4856,10 @@
 
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
+        if (state.searchOpen) {
+          closeSearchPanel({ restoreFocus: true });
+          return;
+        }
         if (state.themeMenuOpen) {
           closeThemeMenu(true);
           return;
@@ -4340,7 +4900,19 @@
     if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
     replaceNavigationState({ view: "matrix" });
     refreshIcons();
-    initializeLibrary().catch((error) => {
+    window.__TAURI__?.event?.listen?.("library-operation-progress", ({ payload }) => {
+      if (!payload) return;
+      const label = payload.operation === "search-index" ? "建立搜索索引" : payload.operation === "directory-import" ? "导入关联目录" : "导入文件";
+      state.loadMessage = `${label} ${payload.current}/${payload.total || "?"}${payload.sourceName ? ` · ${payload.sourceName}` : ""}`;
+      els.statusBand.textContent = state.loadMessage;
+      if (state.libraryOpen) setLibraryStatus(state.loadMessage);
+    });
+    const initialize = async () => {
+      await initializeLibrary();
+      if (isDesktopApp()) await initializeDesktopSearchIndex();
+      else await initializeSearchWorker();
+    };
+    initialize().catch((error) => {
       state.loadMessage = `芯片库加载失败：${error.message || String(error)}`;
       setLibraryStatus(state.loadMessage, true);
       render();
