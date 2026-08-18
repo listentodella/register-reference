@@ -17,14 +17,14 @@
     "name", "bits", "access", "reset", "desc", "values", "roles", "event", "target", "action_hint",
     "ignore_by_default", "condition", "reserved", "reset_info", "access_rules", "variable_length",
   ];
-  const ENCODING_KEYS = ["scheme", "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1", "reg", "selector"];
+  const ENCODING_KEYS = ["scheme", "address", "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1", "reg", "selector"];
   const ACCESSOR_KEYS = ["name", "kind", "instruction", "condition", "encoding"];
   const VARIABLE_KEYS = ["name", "min", "max", "values"];
   const ACCESS_RULE_KEYS = ["access", "condition"];
   const ENUM_VALUE_KEYS = ["value", "desc", "name", "condition"];
   const SYSTEM_ENCODING_SCHEMES = [
     "aarch64_sysreg", "aarch64_special", "aarch32_cp15", "aarch32_coproc", "aarch32_special", "aarch32_vfp",
-    "m_profile_special",
+    "m_profile_special", "riscv_csr",
   ];
 
   function isObject(value) {
@@ -201,6 +201,14 @@
           error(`${location}.${key}`, "必须是非负整数或非空编码表达式");
         }
       });
+      if (encoding.scheme === "riscv_csr") {
+        if (!isInteger(encoding.address) || encoding.address < 0 || encoding.address > 0xFFF) {
+          error(`${location}.address`, "riscv_csr address 必须是 0x000 到 0xFFF 的整数");
+        }
+        fields.filter(([key]) => key !== "address").forEach(([key]) => {
+          error(`${location}.${key}`, "riscv_csr 只能使用 address 编码字段");
+        });
+      }
       return encoding;
     }
 
@@ -334,7 +342,7 @@
       const address = isInteger(register.addr) && register.addr >= 0 ? register.addr : null;
       const isSystemMmio = isSystem && allowsSystemMmio && address !== null;
       if (isSystem) {
-        if ("addr" in register && !allowsSystemMmio) error(`${location}.addr`, "A-profile arm_system 寄存器不能使用 MMIO 地址");
+        if ("addr" in register && !allowsSystemMmio) error(`${location}.addr`, "非 MMIO 架构系统寄存器不能使用 addr");
         if ("addr" in register && allowsSystemMmio && address === null) error(`${location}.addr`, "M-profile MMIO 地址必须是非负整数");
         if (!isSystemMmio) {
           validateEncoding(register.encoding, `${location}.encoding`);
@@ -365,9 +373,9 @@
       else if (bitWidth > width * 8) error(`${location}.bit_width`, `不能超过 width=${width} 对应的 ${width * 8} bit`);
       const validBitWidth = isInteger(bitWidth) && bitWidth >= 1 ? bitWidth : width * 8;
       const addressSpan = "address_span" in register ? register.address_span : width;
-      if (isSystem && !isSystemMmio && "address_span" in register) error(`${location}.address_span`, "非 MMIO arm_system 寄存器不能声明地址跨度");
+      if (isSystem && !isSystemMmio && "address_span" in register) error(`${location}.address_span`, "非 MMIO 架构系统寄存器不能声明地址跨度");
       else if (!isInteger(addressSpan) || addressSpan < 1) error(`${location}.address_span`, "必须是正整数");
-      if (isSystem && !isSystemMmio && "byte_order" in register) error(`${location}.byte_order`, "非 MMIO arm_system 寄存器不能声明字节序");
+      if (isSystem && !isSystemMmio && "byte_order" in register) error(`${location}.byte_order`, "非 MMIO 架构系统寄存器不能声明字节序");
       if ("byte_order" in register && !["little", "big"].includes(register.byte_order)) {
         error(`${location}.byte_order`, "必须是 little 或 big");
       }
@@ -473,8 +481,8 @@
       const registerSpace = requireObject(root.register_space, "register_space");
       if (registerSpace) {
         warnUnknownKeys(registerSpace, REGISTER_SPACE_KEYS, "register_space");
-        if (!requireString(registerSpace.kind, "register_space.kind") || !["mmio", "arm_system"].includes(registerSpace.kind)) {
-          error("register_space.kind", "必须是 mmio 或 arm_system");
+        if (!requireString(registerSpace.kind, "register_space.kind") || !["mmio", "arm_system", "riscv_system"].includes(registerSpace.kind)) {
+          error("register_space.kind", "必须是 mmio、arm_system 或 riscv_system");
         } else {
           registerSpaceKind = registerSpace.kind;
         }
@@ -482,10 +490,10 @@
         if ("profile" in registerSpace) requireString(registerSpace.profile, "register_space.profile");
       }
     }
-    const isSystem = registerSpaceKind === "arm_system";
-    const allowsSystemMmio = isSystem && root.register_space?.profile === "M";
+    const isSystem = ["arm_system", "riscv_system"].includes(registerSpaceKind);
+    const allowsSystemMmio = registerSpaceKind === "arm_system" && root.register_space?.profile === "M";
     if (isSystem && (!isInteger(root.schema_version) || root.schema_version < 2)) {
-      error("schema_version", "arm_system 需要 schema_version: 2 或更高版本");
+      error("schema_version", "架构系统寄存器需要 schema_version: 2 或更高版本");
     }
     if ("source" in root) {
       const source = requireObject(root.source, "source");
@@ -494,12 +502,12 @@
         Object.entries(source).forEach(([key, value]) => requireString(value, `source.${key}`));
       }
     } else if (isSystem) {
-      error("source", "arm_system 数据必须记录官方来源和版本");
+      error("source", "架构系统寄存器数据必须记录官方来源和版本");
     }
 
     let whoRegister = null;
     if (isSystem && "who_am_i" in root) {
-      error("who_am_i", "arm_system 数据不使用 MMIO WHO_AM_I");
+      error("who_am_i", "架构系统寄存器数据不使用 MMIO WHO_AM_I");
     } else if (!isSystem && !("who_am_i" in root)) {
       warn("root", "缺少 who_am_i；未知时也应显式写 reg: null 和 values: []");
     } else if (!isSystem) {
@@ -542,7 +550,7 @@
       if (!page) return;
       warnUnknownKeys(page, PAGE_KEYS, pageLocation);
       if (isSystem) {
-        if ("page_id" in page) error(`${pageLocation}.page_id`, "arm_system 分类页不能使用 MMIO page_id");
+        if ("page_id" in page) error(`${pageLocation}.page_id`, "架构系统寄存器分类页不能使用 MMIO page_id");
       } else if (!isInteger(page.page_id) || page.page_id < 0) {
         error(`${pageLocation}.page_id`, "必须是非负整数");
       } else if (pageIds.has(page.page_id)) {

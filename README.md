@@ -38,6 +38,20 @@ npm run arm:cmsis-import -- <CMSIS_6目录> --core cm33 --version 6.3.0 --output
 
 M-profile YAML 可以同时包含 `m_profile_special` 特殊寄存器和带真实 `addr` 的 SCS MMIO 条目。CMSIS_6 为 Apache-2.0，生成数据应保留 Arm 版权与许可证归属；完整 A-profile XML 仍按其专有 notice 单独处理。
 
+## RISC-V CSR
+
+项目同样支持 schema v2 的 `riscv_system` 架构寄存器。官方机器可读来源使用公开的 [RISC-V Unified Database](https://github.com/riscv-software-src/riscv-unified-db) `spec/std/isa/csr`，不需要从庞大的 Privileged ISA PDF 逐页提取。RV32 与 RV64 分开生成：
+
+```bash
+npm run riscv:import -- <riscv-unified-db目录> \
+  --xlen 32 \
+  --output riscv-rv32-csr.yaml \
+  --version 2026-08-18 \
+  --revision 22776b219c386d549e07b14ed0e781ae7956e11a
+```
+
+CSR 使用 `encoding.scheme: riscv_csr` 与 12-bit `encoding.address`，不会伪装成 MMIO 地址。导入器保留扩展/XLEN/实现参数条件、动态访问类型、动态复位表达式和受限写入规则；RV32 还保留 `mcycleh`、`minstreth` 等高半 CSR。来源选择、许可和生成规则详见 [docs/riscv-csr.md](docs/riscv-csr.md)。可公开复用的 RV32/RV64 成品位于 `register-yaml-library/architecture/riscv`。
+
 ## 使用
 
 开发环境需要 Node.js 22+、Rust stable 和对应平台的 Tauri 系统依赖，不再要求 Python 或 PyYAML。安装依赖并运行：
@@ -62,16 +76,28 @@ npm run build
 
 这些产物无需安装。用户数据仍保存在系统标准应用数据目录，而不是程序旁边；这样可以兼容 macOS App Translocation、Windows 受保护目录和 Linux AppImage 的只读挂载。
 
+顶部工具栏常驻芯片、页面、搜索、语言、进制工具和视图切换。芯片库、附件、YAML 导入、寄存器库关联及主题位于右侧“更多工具”菜单；附件数量会显示在菜单入口上，译文状态则通过语言控件状态点和“关联寄存器库”说明显示。普通桌面宽度保持单行，窄屏仅对筛选控件做响应式换行。
+
 在“芯片库”中可以：
 
-- 导入一个或多个 YAML。
-- 关联 YAML 目录；关联文件会在读取芯片库时同步。
+- 导入一个或多个寄存器 YAML 或翻译 sidecar；同一次选择可以同时包含英文源与译文。
+- 关联寄存器库目录；目录可以同时包含英文寄存器 YAML 与 `locales/<语言>/...` 译文，关联文件会在读取芯片库时同步。
 - 导入时自动执行严格规范检查；不合规文件会被拒绝，并逐项显示原因。
 - 编辑芯片分类。
 - 控制芯片是否出现在主界面。
 - 为具体寄存器添加“备注、注意、待确认”三类本地备注。
 - 为芯片关联 PDF、Markdown、文本、图片或其他本地参考文件。
 - 独立勾选需要分享的芯片，并导出单文件 HTML。
+
+## 中英翻译
+
+工具支持 `register-reference-translation` v1 sidecar。英文寄存器 YAML 始终是地址、位宽、位域、复位值和编码的唯一结构真源；译文只覆盖页面、寄存器、位域、枚举和条件等展示文本，不会改写芯片数据。
+
+导入时可以先选择英文源、再选择 `locales/<语言>/<源路径>` 下的译文，也可以一次同时选择两者。桌面端和浏览器端都会验证 sidecar 结构、选择器以及 `source_sha256`；源文件不匹配、译文过期或包含结构字段时会拒绝导入。目录关联会先处理寄存器源，再处理其中的译文。推荐直接关联 `register-yaml-library` 根目录；如果英文源已经导入，也可以只选择 `locales/zh-CN`。
+
+语言控件旁的目录图标会显示当前芯片的译文状态：绿色表示已绑定中文 sidecar，琥珀色表示当前仅有英文。译文正文会保存到桌面版 SQLite 中，语言切换不依赖编译期固定路径；原目录仅用于首次批量导入和后续自动刷新。因此移动便携程序不会丢失已导入译文，只有移动外部寄存器库后需要重新关联目录。
+
+顶部的 `中文 | 中英 | EN` 控件决定展示方式。缺少单项译文时按字段回退英文；搜索始终同时匹配中英文，不受当前展示模式影响。`draft` / `reviewed` 和 `partial` / `complete` 状态会显示在芯片摘要与芯片库中。独立 HTML 导出会内联所选芯片当前匹配的译文，仍不会包含附件。
 
 导出的 HTML 内联芯片 JSON、CSS、图标和查看器脚本，可以直接双击打开，不依赖 Tauri、Node、服务器或其他文件。
 
@@ -103,7 +129,7 @@ MMIO 备注通过芯片、页面、寄存器地址和名称定位；系统寄存
 
 `.github/workflows/cross-platform.yml` 会在 macOS、Windows 和 Ubuntu 上分别运行 Chromium、WebKit、Rust 测试并构建原生安装产物。CI 产物用于兼容性验证，正式对外分发前仍需配置 Apple Developer ID 和 Windows 代码签名证书。
 
-附件与关联 YAML 目录保存本机绝对路径，因此复制数据库到另一台电脑或另一种操作系统后，需要重新关联这些本地文件；芯片数据、分类和备注不受影响。
+附件与关联寄存器库目录保存本机绝对路径，因此复制数据库到另一台电脑或另一种操作系统后，需要重新关联这些本地文件；芯片数据、译文正文、分类和备注不受影响。
 
 根目录导入的 YAML、构建生成的 `data/chips.data.js` 和单文件 HTML 默认不会进入 Git。需要发布新的公开内置芯片时，应先确认资料授权，再在 `.gitignore` 中显式放行对应 YAML，并在 Rust 内置芯片表中登记。普通用户导入的 YAML 只保存在本机资料库中。
 
@@ -117,6 +143,7 @@ MMIO 备注通过芯片、页面、寄存器地址和名称定位；系统寄存
 python3 .agents/skills/register-yaml-generator/scripts/validate_register_yaml.py --strict chip.yaml
 node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js chip.yaml
 npm run test:arm-import
+npm run test:riscv-import
 npm run data:build
 ```
 

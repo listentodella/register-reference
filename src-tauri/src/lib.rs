@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
 use walkdir::WalkDir;
 
+mod translation;
 mod validation;
 
 const BUILTIN_CHIPS: [(&str, &str, &str); 1] = [(
@@ -32,9 +33,28 @@ struct ChipRecord {
     source_kind: String,
     source_name: String,
     source_path: Option<String>,
+    source_sha256: String,
     yaml_text: String,
     notes: Vec<RegisterNote>,
     attachments: Vec<ChipAttachment>,
+    translations: Vec<TranslationRecord>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationRecord {
+    id: i64,
+    source_sha256: String,
+    source_file: String,
+    source_locale: String,
+    locale: String,
+    status: String,
+    coverage: String,
+    method: String,
+    translator: String,
+    updated: String,
+    source_path: Option<String>,
+    yaml_text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,6 +119,7 @@ struct ChipMetadata {
 #[serde(rename_all = "camelCase")]
 struct ImportReport {
     imported: usize,
+    translations: usize,
     failures: Vec<String>,
     folder: Option<String>,
 }
@@ -157,6 +178,31 @@ fn initialize_database(path: &DatabasePath) -> Result<(), String> {
                 ON chip_attachments(chip_id, created_at DESC);",
         )
         .map_err(|error| format!("无法初始化芯片库：{error}"))?;
+
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS translations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_sha256 TEXT NOT NULL,
+                source_file TEXT NOT NULL,
+                source_locale TEXT NOT NULL,
+                locale TEXT NOT NULL,
+                status TEXT NOT NULL,
+                coverage TEXT NOT NULL,
+                method TEXT NOT NULL,
+                translator TEXT NOT NULL,
+                updated TEXT NOT NULL,
+                source_path TEXT,
+                yaml_text TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_key, locale)
+            );
+            CREATE INDEX IF NOT EXISTS idx_translations_source
+                ON translations(source_sha256, locale);",
+        )
+        .map_err(|error| format!("无法初始化翻译库：{error}"))?;
 
     let has_register_key = connection
         .prepare("PRAGMA table_info(register_notes)")
@@ -363,7 +409,130 @@ fn refresh_linked_chips(connection: &Connection) {
     }
 }
 
+fn matching_source_yaml(connection: &Connection, source_sha256: &str) -> Result<String, String> {
+    let mut statement = connection
+        .prepare("SELECT yaml_text FROM chips")
+        .map_err(|error| format!("无法读取英文源 YAML：{error}"))?;
+    let yaml_texts = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法查询英文源 YAML：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取英文源 YAML：{error}"))?;
+    yaml_texts
+        .into_iter()
+        .find(|text| translation::sha256_hex(text) == source_sha256)
+        .ok_or_else(|| {
+            "找不到与 source_sha256 匹配的英文源 YAML；请先导入对应英文寄存器文件".to_owned()
+        })
+}
+
+fn upsert_translation(
+    connection: &Connection,
+    yaml_text: &str,
+    source_name: &str,
+    source_path: Option<&Path>,
+) -> Result<(), String> {
+    let document: serde_yaml::Value =
+        serde_yaml::from_str(yaml_text).map_err(|error| format!("翻译 YAML 解析失败：{error}"))?;
+    if !translation::is_translation_document(&document) {
+        return Err("不是 register-reference-translation 翻译 sidecar".to_owned());
+    }
+    let source_sha256 = document
+        .as_mapping()
+        .and_then(|root| root.get(serde_yaml::Value::String("source_sha256".to_owned())))
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let source_text = matching_source_yaml(connection, &source_sha256)?;
+    let source_document: serde_yaml::Value = serde_yaml::from_str(&source_text)
+        .map_err(|error| format!("英文源 YAML 解析失败：{error}"))?;
+    let summary = translation::validate_translation_yaml(
+        yaml_text,
+        &document,
+        &source_text,
+        &source_document,
+    )?;
+    let source_path_text = source_path.map(|path| path.to_string_lossy().into_owned());
+    let source_key = source_path_text
+        .clone()
+        .unwrap_or_else(|| format!("imported:{}", summary.source_file));
+    if source_path_text.is_some() {
+        connection
+            .execute(
+                "DELETE FROM translations WHERE source_key = ?1 AND locale <> ?2",
+                params![source_key, summary.locale],
+            )
+            .map_err(|error| format!("无法更新关联译文语言：{error}"))?;
+    }
+    connection
+        .execute(
+            "DELETE FROM translations
+             WHERE source_sha256 = ?1 AND locale = ?2 AND source_key <> ?3",
+            params![summary.source_sha256, summary.locale, source_key],
+        )
+        .map_err(|error| format!("无法替换同语言旧译文：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO translations (
+                source_sha256, source_file, source_locale, locale, status, coverage, method,
+                translator, updated, source_path, yaml_text, source_key
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(source_key, locale) DO UPDATE SET
+                source_sha256 = excluded.source_sha256,
+                source_file = excluded.source_file,
+                source_locale = excluded.source_locale,
+                status = excluded.status,
+                coverage = excluded.coverage,
+                method = excluded.method,
+                translator = excluded.translator,
+                updated = excluded.updated,
+                source_path = excluded.source_path,
+                yaml_text = excluded.yaml_text,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                summary.source_sha256,
+                summary.source_file,
+                summary.source_locale,
+                summary.locale,
+                summary.status,
+                summary.coverage,
+                summary.method,
+                summary.translator,
+                summary.updated,
+                source_path_text,
+                yaml_text,
+                source_key,
+            ],
+        )
+        .map_err(|error| format!("无法保存译文 {source_name}：{error}"))?;
+    Ok(())
+}
+
+fn refresh_linked_translations(connection: &Connection) {
+    let linked = connection
+        .prepare("SELECT source_path FROM translations WHERE source_path IS NOT NULL")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or_default();
+    for source_path in linked {
+        let path = PathBuf::from(&source_path);
+        let Ok(yaml_text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let source_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("translation.yaml");
+        let _ = upsert_translation(connection, &yaml_text, source_name, Some(&path));
+    }
+}
+
 fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
+    refresh_linked_translations(connection);
     let mut statement = connection
         .prepare(
             "SELECT id, sensor, vendor, family, device_type, category, enabled, builtin,
@@ -374,6 +543,7 @@ fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
         .map_err(|error| format!("无法读取芯片库：{error}"))?;
     let mut records = statement
         .query_map([], |row| {
+            let yaml_text: String = row.get(11)?;
             Ok(ChipRecord {
                 id: row.get(0)?,
                 sensor: row.get(1)?,
@@ -386,9 +556,11 @@ fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
                 source_kind: row.get(8)?,
                 source_name: row.get(9)?,
                 source_path: row.get(10)?,
-                yaml_text: row.get(11)?,
+                source_sha256: translation::sha256_hex(&yaml_text),
+                yaml_text,
                 notes: Vec::new(),
                 attachments: Vec::new(),
+                translations: Vec::new(),
             })
         })
         .map_err(|error| format!("无法查询芯片库：{error}"))?
@@ -416,6 +588,52 @@ fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
     for record in &mut records {
         record.attachments = attachments_by_chip.remove(&record.id).unwrap_or_default();
     }
+    let translations = query_translations(connection)?;
+    let mut translations_by_sha: HashMap<String, Vec<TranslationRecord>> = HashMap::new();
+    for item in translations {
+        translations_by_sha
+            .entry(item.source_sha256.clone())
+            .or_default()
+            .push(item);
+    }
+    for record in &mut records {
+        record.translations = translations_by_sha
+            .get(&record.source_sha256)
+            .cloned()
+            .unwrap_or_default();
+    }
+    Ok(records)
+}
+
+fn query_translations(connection: &Connection) -> Result<Vec<TranslationRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, source_sha256, source_file, source_locale, locale, status, coverage,
+                    method, translator, updated, source_path, yaml_text
+             FROM translations
+             ORDER BY locale COLLATE NOCASE, source_file COLLATE NOCASE, id DESC",
+        )
+        .map_err(|error| format!("无法读取翻译库：{error}"))?;
+    let records = statement
+        .query_map([], |row| {
+            Ok(TranslationRecord {
+                id: row.get(0)?,
+                source_sha256: row.get(1)?,
+                source_file: row.get(2)?,
+                source_locale: row.get(3)?,
+                locale: row.get(4)?,
+                status: row.get(5)?,
+                coverage: row.get(6)?,
+                method: row.get(7)?,
+                translator: row.get(8)?,
+                updated: row.get(9)?,
+                source_path: row.get(10)?,
+                yaml_text: row.get(11)?,
+            })
+        })
+        .map_err(|error| format!("无法查询翻译库：{error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("无法读取翻译记录：{error}"))?;
     Ok(records)
 }
 
@@ -530,7 +748,14 @@ fn yaml_register_identity(register: &serde_yaml::Mapping) -> Option<String> {
         let scheme = encoding
             .get(serde_yaml::Value::String("scheme".to_owned()))
             .and_then(serde_yaml::Value::as_str)
-            .unwrap_or("arm_system");
+            .unwrap_or("architecture_system");
+        if scheme == "riscv_csr" {
+            let address = encoding
+                .get(serde_yaml::Value::String("address".to_owned()))
+                .and_then(yaml_identity_scalar)
+                .unwrap_or_else(|| "?".to_owned());
+            return Some(format!("riscv_csr:address={address}:{name}"));
+        }
         let values = [
             "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1",
             "reg", "selector",
@@ -847,14 +1072,17 @@ fn import_yaml_directory(
     let Some(folder) = rfd::FileDialog::new().pick_folder() else {
         return Ok(ImportReport {
             imported: 0,
+            translations: 0,
             failures: Vec::new(),
             folder: None,
         });
     };
     let connection = open_database(&database)?;
     let mut imported = 0;
+    let mut translations = 0;
     let mut failures = Vec::new();
 
+    let mut files = Vec::new();
     for entry in WalkDir::new(&folder)
         .follow_links(false)
         .into_iter()
@@ -874,27 +1102,58 @@ fn import_yaml_directory(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("registers.yaml");
-        match fs::read_to_string(path)
-            .map_err(|error| format!("读取失败：{error}"))
-            .and_then(|yaml_text| {
-                upsert_imported_chip(
-                    &connection,
-                    &yaml_text,
-                    source_name,
-                    Some(path),
-                    category.as_deref(),
-                )
-            }) {
+        match fs::read_to_string(path) {
+            Ok(yaml_text) => files.push((path.to_owned(), source_name.to_owned(), yaml_text)),
+            Err(error) => failures.push(format!("{}: 读取失败：{error}", path.display())),
+        }
+    }
+
+    let mut source_files = Vec::new();
+    let mut translation_files = Vec::new();
+    for (path, source_name, yaml_text) in files {
+        match serde_yaml::from_str::<serde_yaml::Value>(&yaml_text) {
+            Ok(document) if translation::is_translation_document(&document) => {
+                translation_files.push((path, source_name, yaml_text));
+            }
+            _ => source_files.push((path, source_name, yaml_text)),
+        }
+    }
+    for (path, source_name, yaml_text) in source_files {
+        match upsert_imported_chip(
+            &connection,
+            &yaml_text,
+            &source_name,
+            Some(&path),
+            category.as_deref(),
+        ) {
             Ok(_) => imported += 1,
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    for (path, source_name, yaml_text) in translation_files {
+        match upsert_translation(&connection, &yaml_text, &source_name, Some(&path)) {
+            Ok(_) => translations += 1,
             Err(error) => failures.push(format!("{}: {error}", path.display())),
         }
     }
 
     Ok(ImportReport {
         imported,
+        translations,
         failures,
         folder: Some(folder.to_string_lossy().into_owned()),
     })
+}
+
+#[tauri::command]
+fn import_translation(
+    database: State<'_, DatabasePath>,
+    source_name: String,
+    yaml_text: String,
+) -> Result<Vec<ChipRecord>, String> {
+    let connection = open_database(&database)?;
+    upsert_translation(&connection, &yaml_text, &source_name, None)?;
+    query_chips(&connection)
 }
 
 #[tauri::command]
@@ -1144,6 +1403,10 @@ fn build_standalone_html(records: &[ChipRecord], include_notes: bool) -> Result<
             JsonValue::String(record.source_name.clone()),
         );
         object.insert(
+            "_sourceSha256".to_owned(),
+            JsonValue::String(record.source_sha256.clone()),
+        );
+        object.insert(
             "_category".to_owned(),
             JsonValue::String(record.category.clone()),
         );
@@ -1154,6 +1417,19 @@ fn build_standalone_html(records: &[ChipRecord], include_notes: bool) -> Result<
                     .map_err(|error| format!("无法序列化寄存器备注：{error}"))?,
             );
         }
+        let translation_values = record
+            .translations
+            .iter()
+            .map(|translation| {
+                serde_yaml::from_str::<serde_yaml::Value>(&translation.yaml_text)
+                    .map_err(|error| format!("{} 翻译解析失败：{error}", translation.source_file))
+                    .and_then(yaml_to_json)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        object.insert(
+            "_translations".to_owned(),
+            JsonValue::Array(translation_values),
+        );
         chips.push(chip);
     }
 
@@ -1182,6 +1458,13 @@ fn build_standalone_html(records: &[ChipRecord], include_notes: bool) -> Result<
         &format!(
             "<script>{}</script>",
             include_str!("../../yaml-validator.js")
+        ),
+    );
+    html = html.replace(
+        "<script src=\"translation-validator.js\"></script>",
+        &format!(
+            "<script>{}</script>",
+            include_str!("../../translation-validator.js")
         ),
     );
     html = html.replace(
@@ -1252,6 +1535,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_chips,
             import_yaml,
+            import_translation,
             import_yaml_directory,
             set_chip_enabled,
             set_chip_category,
@@ -1343,6 +1627,55 @@ mod tests {
         assert!(!build_standalone_html(&selected, false)
             .unwrap()
             .contains("导出备注测试"));
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn validates_binds_and_exports_translation_sidecars() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let source_text = BUILTIN_CHIPS[0].2;
+        let source_sha256 = translation::sha256_hex(source_text);
+        let sidecar = format!(
+            r#"translation_schema_version: 1
+format: "register-reference-translation"
+source_locale: "en"
+locale: "zh-CN"
+source_file: "controllers/usb/rockchip/rk3588-dwc3.yaml"
+source_sha256: "{source_sha256}"
+metadata:
+  status: "draft"
+  coverage: "partial"
+  method: "human"
+  translator: "test"
+  updated: "2026-08-17"
+translations:
+  sensor: "RK3588 DWC3 中文测试"
+"#
+        );
+        upsert_translation(&connection, &sidecar, "rk3588-dwc3.zh-CN.yaml", None).unwrap();
+        let records = query_chips(&connection).unwrap();
+        let record = records
+            .iter()
+            .find(|record| record.id == "builtin:dwc3-rk3588")
+            .unwrap();
+        assert_eq!(record.translations.len(), 1);
+        assert_eq!(record.translations[0].locale, "zh-CN");
+        assert!(build_standalone_html(std::slice::from_ref(record), false)
+            .unwrap()
+            .contains("RK3588 DWC3 中文测试"));
+
+        let stale = sidecar.replace(&source_sha256, &"0".repeat(64));
+        let error = upsert_translation(&connection, &stale, "stale.yaml", None).unwrap_err();
+        assert!(error.contains("找不到与 source_sha256 匹配"));
+        let structural = sidecar.replace(
+            "  sensor: \"RK3588 DWC3 中文测试\"",
+            "  sensor: \"RK3588 DWC3 中文测试\"\n  vendor: \"不允许覆盖结构字段\"",
+        );
+        let error =
+            upsert_translation(&connection, &structural, "structural.yaml", None).unwrap_err();
+        assert!(error.contains("file.translations.vendor"));
         let _ = fs::remove_file(database.0);
     }
 
@@ -1467,6 +1800,79 @@ pages:
             default_category(&parse_metadata(yaml).unwrap()),
             "架构寄存器"
         );
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn stores_riscv_csr_notes_by_encoding_identity() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let yaml = r#"schema_version: 2
+sensor: "RISCV_TEST"
+vendor: "RISC-V International"
+family: "RISC-V Privileged ISA"
+device_type: "architecture_registers"
+register_space:
+  kind: "riscv_system"
+  architecture: "RV64"
+  profile: "privileged"
+source:
+  title: "Synthetic test"
+  version: "test"
+  revision: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Machine:
+    access: "CSR instruction encoding space"
+    desc: "Synthetic RISC-V CSR category"
+    registers:
+      - name: "mstatus"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Synthetic machine status register"
+        encoding:
+          scheme: "riscv_csr"
+          address: 0x300
+        accessors:
+          - name: "mstatus"
+            kind: "read"
+            instruction: "CSRRS rd, mstatus, x0"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x300
+"#;
+        let chip_id =
+            upsert_imported_chip(&connection, yaml, "riscv-test.yaml", None, None).unwrap();
+        let register_key = "riscv_csr:address=768:mstatus";
+        let notes = upsert_register_note(
+            &connection,
+            &RegisterNoteInput {
+                note_id: None,
+                chip_id: chip_id.clone(),
+                page_name: "Machine".to_owned(),
+                register_addr: None,
+                register_key: register_key.to_owned(),
+                register_name: "mstatus".to_owned(),
+                kind: "note".to_owned(),
+                content: "Check implementation-defined fields".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].register_addr, None);
+        assert_eq!(notes[0].register_key, register_key);
+        assert_eq!(
+            default_category(&parse_metadata(yaml).unwrap()),
+            "架构寄存器"
+        );
+        let invalid = yaml.replace("0x300", "0x1000");
+        let error = upsert_imported_chip(&connection, &invalid, "riscv-invalid.yaml", None, None)
+            .unwrap_err();
+        assert!(error.contains("riscv_csr address"));
         let _ = fs::remove_file(database.0);
     }
 

@@ -74,8 +74,8 @@ const FIELD_KEYS: &[&str] = &[
     "variable_length",
 ];
 const ENCODING_KEYS: &[&str] = &[
-    "scheme", "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1",
-    "reg", "selector",
+    "scheme", "address", "op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r",
+    "m", "m1", "reg", "selector",
 ];
 const ACCESSOR_KEYS: &[&str] = &["name", "kind", "instruction", "condition", "encoding"];
 const VARIABLE_KEYS: &[&str] = &["name", "min", "max", "values"];
@@ -89,6 +89,7 @@ const SYSTEM_ENCODING_SCHEMES: &[&str] = &[
     "aarch32_special",
     "aarch32_vfp",
     "m_profile_special",
+    "riscv_csr",
 ];
 
 #[derive(Default)]
@@ -467,6 +468,25 @@ fn validate_encoding(validator: &mut Validator, value: Option<&Value>, location:
     if field_count == 0 {
         validator.error(location, "至少需要一个编码字段");
     }
+    if get(encoding, "scheme").and_then(Value::as_str) == Some("riscv_csr") {
+        if get(encoding, "address")
+            .and_then(as_nonnegative_integer)
+            .is_none_or(|address| address > 0xFFF)
+        {
+            validator.error(
+                &format!("{location}.address"),
+                "riscv_csr address 必须是 0x000 到 0xFFF 的整数",
+            );
+        }
+        for key in encoding.keys().filter_map(Value::as_str) {
+            if !matches!(key, "scheme" | "address") {
+                validator.error(
+                    &format!("{location}.{key}"),
+                    "riscv_csr 只能使用 address 编码字段",
+                );
+            }
+        }
+    }
 }
 
 fn validate_accessors(validator: &mut Validator, value: Option<&Value>, location: &str) {
@@ -707,7 +727,7 @@ fn validate_register(
         if get(register, "addr").is_some() && !allows_system_mmio {
             validator.error(
                 &format!("{location}.addr"),
-                "A-profile arm_system 寄存器不能使用 MMIO 地址",
+                "非 MMIO 架构系统寄存器不能使用 addr",
             );
         }
         if get(register, "addr").is_some() && allows_system_mmio && !is_system_mmio {
@@ -838,14 +858,14 @@ fn validate_register(
     if is_system && !is_system_mmio && get(register, "address_span").is_some() {
         validator.error(
             &format!("{location}.address_span"),
-            "非 MMIO arm_system 寄存器不能声明地址跨度",
+            "非 MMIO 架构系统寄存器不能声明地址跨度",
         );
     }
 
     if is_system && !is_system_mmio && get(register, "byte_order").is_some() {
         validator.error(
             &format!("{location}.byte_order"),
-            "非 MMIO arm_system 寄存器不能声明字节序",
+            "非 MMIO 架构系统寄存器不能声明字节序",
         );
     }
     if let Some(byte_order) = get(register, "byte_order") {
@@ -1157,6 +1177,12 @@ fn validate_browser_subset(validator: &mut Validator, text: &str) {
     }
 }
 
+pub(crate) fn validate_browser_yaml_subset(text: &str) -> Result<(), String> {
+    let mut validator = Validator::default();
+    validate_browser_subset(&mut validator, text);
+    validator.finish()
+}
+
 pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(), String> {
     let mut validator = Validator::default();
     validate_browser_subset(&mut validator, text);
@@ -1196,7 +1222,11 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
                 match get(register_space, "kind").and_then(Value::as_str) {
                     Some("mmio") => register_space_kind = "mmio",
                     Some("arm_system") => register_space_kind = "arm_system",
-                    _ => validator.error("register_space.kind", "必须是 mmio 或 arm_system"),
+                    Some("riscv_system") => register_space_kind = "riscv_system",
+                    _ => validator.error(
+                        "register_space.kind",
+                        "必须是 mmio、arm_system 或 riscv_system",
+                    ),
                 }
             }
             for key in ["architecture", "profile"] {
@@ -1210,8 +1240,8 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
             }
         }
     }
-    let is_system = register_space_kind == "arm_system";
-    let allows_system_mmio = is_system
+    let is_system = matches!(register_space_kind, "arm_system" | "riscv_system");
+    let allows_system_mmio = register_space_kind == "arm_system"
         && get(root, "register_space")
             .and_then(Value::as_mapping)
             .and_then(|space| get(space, "profile"))
@@ -1224,7 +1254,7 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
     {
         validator.error(
             "schema_version",
-            "arm_system 需要 schema_version: 2 或更高版本",
+            "架构系统寄存器需要 schema_version: 2 或更高版本",
         );
     }
     if let Some(source) = get(root, "source") {
@@ -1239,12 +1269,12 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
             }
         }
     } else if is_system {
-        validator.error("source", "arm_system 数据必须记录官方来源和版本");
+        validator.error("source", "架构系统寄存器数据必须记录官方来源和版本");
     }
 
     let who_register = match get(root, "who_am_i") {
         Some(_value) if is_system => {
-            validator.error("who_am_i", "arm_system 数据不使用 MMIO WHO_AM_I");
+            validator.error("who_am_i", "架构系统寄存器数据不使用 MMIO WHO_AM_I");
             None
         }
         Some(value) => validate_who_am_i(&mut validator, value),
@@ -1281,7 +1311,7 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
         if is_system && get(page, "page_id").is_some() {
             validator.error(
                 &format!("{page_location}.page_id"),
-                "arm_system 分类页不能使用 MMIO page_id",
+                "架构系统寄存器分类页不能使用 MMIO page_id",
             );
         } else if is_system {
             // System-register pages are named categories, not address pages.

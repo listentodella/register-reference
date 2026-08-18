@@ -1,7 +1,9 @@
 (function () {
   const chips = Array.isArray(window.REGISTER_CHIPS) ? window.REGISTER_CHIPS : [];
   const THEME_STORAGE_KEY = "register-reference.theme";
+  const LANGUAGE_STORAGE_KEY = "register-reference.language-mode";
   const NAVIGATION_STATE_KEY = "registerReferenceNavigation";
+  const SYSTEM_SEARCH_RESULT_LIMIT = 200;
   const themeLabels = {
     system: "跟随系统",
     light: "清晰亮色",
@@ -23,8 +25,8 @@
     libraryOpen: false,
     libraryStatus: "",
     libraryStatusError: false,
-    exportSelection: new Set(),
-    exportSelectionInitialized: false,
+    librarySelection: new Set(),
+    libraryRemovalIds: [],
     noteRegisterKey: null,
     editingNoteId: null,
     noteKind: "note",
@@ -50,6 +52,9 @@
     calculatorLastResult: null,
     themePreference: "light",
     themeMenuOpen: false,
+    toolsMenuOpen: false,
+    languageMode: "bilingual",
+    translationNotice: "",
     systemOverviewSnapshot: null,
   };
 
@@ -59,13 +64,23 @@
     chipSelect: document.getElementById("chipSelect"),
     pageSelect: document.getElementById("pageSelect"),
     searchInput: document.getElementById("searchInput"),
+    languageSwitcher: document.getElementById("languageSwitcher"),
+    languageControl: document.getElementById("languageControl"),
+    languageButtons: Array.from(document.querySelectorAll("[data-language-mode]")),
+    translationAvailability: document.getElementById("translationAvailability"),
+    toolsMenuPicker: document.getElementById("toolsMenuPicker"),
+    toolsMenuButton: document.getElementById("toolsMenuButton"),
+    toolsMenu: document.getElementById("toolsMenu"),
+    toolsMenuBadge: document.getElementById("toolsMenuBadge"),
     loadYamlButton: document.getElementById("loadYamlButton"),
     loadFolderButton: document.getElementById("loadFolderButton"),
     libraryButton: document.getElementById("libraryButton"),
+    libraryQuickButton: document.getElementById("libraryQuickButton"),
     attachmentsButton: document.getElementById("attachmentsButton"),
     attachmentsButtonCount: document.getElementById("attachmentsButtonCount"),
     themePicker: document.getElementById("themePicker"),
     themeButton: document.getElementById("themeButton"),
+    themeButtonLabel: document.getElementById("themeButtonLabel"),
     themeMenu: document.getElementById("themeMenu"),
     themeOptions: Array.from(document.querySelectorAll("[data-theme-option]")),
     yamlFileInput: document.getElementById("yamlFileInput"),
@@ -90,8 +105,21 @@
     librarySearchInput: document.getElementById("librarySearchInput"),
     libraryImportButton: document.getElementById("libraryImportButton"),
     libraryFolderButton: document.getElementById("libraryFolderButton"),
+    librarySelectAll: document.getElementById("librarySelectAll"),
     libraryList: document.getElementById("libraryList"),
     libraryStatus: document.getElementById("libraryStatus"),
+    librarySelectionSummary: document.getElementById("librarySelectionSummary"),
+    libraryBatchCategory: document.getElementById("libraryBatchCategory"),
+    libraryBatchCategoryButton: document.getElementById("libraryBatchCategoryButton"),
+    libraryShowSelectedButton: document.getElementById("libraryShowSelectedButton"),
+    libraryHideSelectedButton: document.getElementById("libraryHideSelectedButton"),
+    libraryRemoveSelectedButton: document.getElementById("libraryRemoveSelectedButton"),
+    libraryRemoveDialog: document.getElementById("libraryRemoveDialog"),
+    libraryRemoveSummary: document.getElementById("libraryRemoveSummary"),
+    libraryRemoveList: document.getElementById("libraryRemoveList"),
+    libraryRemoveImpact: document.getElementById("libraryRemoveImpact"),
+    libraryRemoveCancelButton: document.getElementById("libraryRemoveCancelButton"),
+    libraryRemoveConfirmButton: document.getElementById("libraryRemoveConfirmButton"),
     includeNotesExport: document.getElementById("includeNotesExport"),
     attachmentsDialog: document.getElementById("attachmentsDialog"),
     attachmentsDialogChip: document.getElementById("attachmentsDialogChip"),
@@ -184,6 +212,7 @@
     els.themeButton.title = `主题：${label}`;
     els.themeButton.setAttribute("aria-label", `切换主题，当前为${label}`);
     els.themeButton.setAttribute("aria-expanded", String(state.themeMenuOpen));
+    els.themeButtonLabel.textContent = label;
     els.themeMenu.hidden = !state.themeMenuOpen;
     els.themeOptions.forEach((option) => {
       const active = option.dataset.themeOption === state.themePreference;
@@ -221,6 +250,30 @@
     if (restoreFocus) els.themeButton.focus();
   }
 
+  function visibleToolsMenuItems() {
+    return Array.from(els.toolsMenu.querySelectorAll('[role="menuitem"], [role="menuitemradio"]'))
+      .filter((item) => !item.hidden && item.getClientRects().length > 0 && !item.disabled);
+  }
+
+  function renderToolsMenu() {
+    els.toolsMenuButton.setAttribute("aria-expanded", String(state.toolsMenuOpen));
+    els.toolsMenu.hidden = !state.toolsMenuOpen;
+  }
+
+  function openToolsMenu() {
+    state.toolsMenuOpen = true;
+    renderToolsMenu();
+    window.requestAnimationFrame(() => visibleToolsMenuItems()[0]?.focus());
+  }
+
+  function closeToolsMenu(restoreFocus = false) {
+    if (!state.toolsMenuOpen) return;
+    if (state.themeMenuOpen) closeThemeMenu(false);
+    state.toolsMenuOpen = false;
+    renderToolsMenu();
+    if (restoreFocus) els.toolsMenuButton.focus();
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replace(/&/g, "&amp;")
@@ -228,6 +281,178 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function normalizeLanguageMode(value) {
+    return ["zh", "bilingual", "en"].includes(value) ? value : "bilingual";
+  }
+
+  function readStoredLanguageMode() {
+    try {
+      return normalizeLanguageMode(window.localStorage.getItem(LANGUAGE_STORAGE_KEY));
+    } catch (_error) {
+      return "bilingual";
+    }
+  }
+
+  function setLanguageMode(mode, persist = true) {
+    state.languageMode = normalizeLanguageMode(mode);
+    els.languageButtons.forEach((button) => {
+      const active = button.dataset.languageMode === state.languageMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    if (persist) {
+      try {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, state.languageMode);
+      } catch (_error) {
+        // The selected mode still applies for this session when storage is unavailable.
+      }
+    }
+    updateLanguageControl();
+  }
+
+  function translationDocumentFromRecord(record) {
+    if (window.isRegisterTranslationDocument?.(record?.translationData)) return record.translationData;
+    if (record?._translationParsed) return record._translationDocument || null;
+    if (!record?.yamlText) return null;
+    try {
+      const data = window.parseRegisterYaml(record.yamlText);
+      record._translationParsed = true;
+      record._translationDocument = window.isRegisterTranslationDocument?.(data) ? data : null;
+      return record._translationDocument;
+    } catch (_error) {
+      record._translationParsed = true;
+      record._translationDocument = null;
+      return null;
+    }
+  }
+
+  function getRecordTranslationDocument(record, locale = "zh-CN") {
+    return (record?.translations || [])
+      .map(translationDocumentFromRecord)
+      .find((translation) => translation?.locale === locale) || null;
+  }
+
+  function getTranslationDocument(chip = getChip(), locale = "zh-CN") {
+    const translations = Array.isArray(chip?._translations) ? chip._translations : [];
+    return translations.find((item) => item?.locale === locale) || null;
+  }
+
+  function getTranslationRoot(chip = getChip(), locale = "zh-CN") {
+    return getTranslationDocument(chip, locale)?.translations || null;
+  }
+
+  function getPageTranslation(pageName, chip = getChip()) {
+    const pages = getTranslationRoot(chip)?.pages;
+    return Array.isArray(pages) ? pages.find((page) => page?.name === pageName) || null : null;
+  }
+
+  function getRegisterPageName(reg) {
+    return reg?._pageName || state.pageName;
+  }
+
+  function getRegisterTranslation(reg, pageName = getRegisterPageName(reg), chip = getChip()) {
+    const registers = getPageTranslation(pageName, chip)?.registers;
+    return Array.isArray(registers) ? registers.find((item) => item?.name === reg?.name) || null : null;
+  }
+
+  function getFieldTranslation(field, reg, pageName = getRegisterPageName(reg), chip = getChip()) {
+    const fields = getRegisterTranslation(reg, pageName, chip)?.fields;
+    if (!Array.isArray(fields)) return null;
+    return fields.find((item) => item?.name === field?.name && String(item?.bits) === String(field?.bits)
+      && (!item.source_condition || item.source_condition === field.condition)) || null;
+  }
+
+  function scalarTranslationKey(value) {
+    if (typeof value === "number" && Number.isInteger(value)) return `integer:${BigInt(value)}`;
+    const text = String(value ?? "").trim();
+    try {
+      if (/^[+-]?\d+$/.test(text) || /^0x[0-9a-f]+$/i.test(text) || /^0b[01]+$/i.test(text)) {
+        return `integer:${BigInt(text)}`;
+      }
+    } catch (_error) {
+      // Keep malformed selectors as text.
+    }
+    return `string:${text}`;
+  }
+
+  function getValueTranslation(fieldTranslation, value, condition = "") {
+    const values = fieldTranslation?.values;
+    if (!Array.isArray(values)) return null;
+    return values.find((item) => scalarTranslationKey(item?.value) === scalarTranslationKey(value)
+      && (!item.source_condition || item.source_condition === condition)) || null;
+  }
+
+  function translatedString(source, translation) {
+    const original = String(source ?? "");
+    const localized = typeof translation === "string" && translation.trim() ? translation : "";
+    if (state.languageMode === "en" || !localized) return original;
+    if (state.languageMode === "zh") return localized;
+    return localized === original ? original : `${localized}\n${original}`;
+  }
+
+  function localizedLabel(source, translation) {
+    const original = String(source ?? "");
+    const localized = typeof translation === "string" && translation.trim() ? translation : "";
+    if (state.languageMode === "en" || !localized || localized === original) return original;
+    if (state.languageMode === "zh") return localized;
+    return `${localized} / ${original}`;
+  }
+
+  function renderLocalizedText(source, translation, className = "") {
+    const original = String(source ?? "");
+    const localized = typeof translation === "string" && translation.trim() ? translation : "";
+    const classes = className ? ` ${className}` : "";
+    if (state.languageMode === "en" || !localized || localized === original) {
+      return escapeHtml(original).replace(/\n/g, "<br>");
+    }
+    if (state.languageMode === "zh") return escapeHtml(localized).replace(/\n/g, "<br>");
+    return `<span class="localized-pair${classes}"><span class="localized-primary">${escapeHtml(localized).replace(/\n/g, "<br>")}</span><span class="localized-original">${escapeHtml(original).replace(/\n/g, "<br>")}</span></span>`;
+  }
+
+  function translationStatusLabel(chip = getChip()) {
+    const translation = getTranslationDocument(chip);
+    if (!translation?.metadata) return "";
+    const status = translation.metadata.status === "reviewed" ? "已审校" : "草稿";
+    const coverage = translation.metadata.coverage === "complete" ? "完整" : "部分";
+    return `译文 ${status} · ${coverage}`;
+  }
+
+  function updateLanguageControl(chip = getChip()) {
+    const translation = getTranslationDocument(chip);
+    const available = Boolean(translation);
+    const chipName = chip?.sensor || "当前芯片";
+    const availableLabel = translationStatusLabel(chip);
+    const missingHint = `${chipName} 未加载中文译文；选择中文或中英时将回退显示英文`;
+
+    els.languageSwitcher?.classList.toggle("translation-available", available);
+    els.languageSwitcher?.classList.toggle("translation-missing", !available);
+    els.languageSwitcher.title = available ? `${chipName} 已加载${availableLabel || "中文译文"}` : missingHint;
+    els.languageControl.dataset.translationAvailable = String(available);
+    els.languageButtons.forEach((button) => {
+      const mode = button.dataset.languageMode;
+      if (mode === "en") {
+        button.title = "只显示英文原文";
+      } else if (available) {
+        button.title = mode === "zh" ? "优先显示中文，缺失条目回退英文" : "同时显示中文和英文";
+      } else {
+        button.title = missingHint;
+      }
+    });
+
+    els.translationAvailability.textContent = available
+      ? `${availableLabel} · 点击可重新关联`
+      : "当前芯片仅英文 · 点击关联译文";
+    els.loadFolderButton.dataset.translationAvailable = String(available);
+    els.loadFolderButton.title = available
+      ? `${chipName} 已加载${availableLabel || "中文译文"}；点击可重新关联寄存器库目录`
+      : `${missingHint}；点击关联寄存器库目录`;
+    els.loadFolderButton.setAttribute("aria-label", els.loadFolderButton.title);
+  }
+
+  function currentStatusMessage() {
+    return [state.loadMessage, state.translationNotice].filter(Boolean).join(" · ");
   }
 
   function formatHex(value, minDigits = 2) {
@@ -244,7 +469,7 @@
   }
 
   function isSystemChip(chip = getChip()) {
-    return chip?.register_space?.kind === "arm_system";
+    return ["arm_system", "riscv_system"].includes(chip?.register_space?.kind);
   }
 
   function hasSystemMmioAddress(reg) {
@@ -260,6 +485,11 @@
 
   function formatSystemEncoding(reg) {
     const encoding = reg?.encoding || {};
+    if (encoding.scheme === "riscv_csr") {
+      const address = Number(encoding.address);
+      const formatted = Number.isFinite(address) ? address.toString(16).toUpperCase().padStart(3, "0") : "?";
+      return "CSR 0x" + formatted;
+    }
     if (encoding.scheme === "aarch64_sysreg") {
       return [
         encodingComponent(encoding.op0, "S"),
@@ -288,6 +518,9 @@
     if (!isSystemChip()) return `mmio:${Number(reg.addr || 0)}:${reg.name || "register"}`;
     if (hasSystemMmioAddress(reg)) return `mmio:${Number(reg.addr)}:${reg.name || "register"}`;
     const encoding = reg?.encoding || {};
+    if (encoding.scheme === "riscv_csr") {
+      return `riscv_csr:address=${encoding.address}:${reg.name || "register"}`;
+    }
     const order = ["op0", "op1", "crn", "crm", "crd", "op2", "coproc", "opc1", "opc2", "r", "m", "m1", "reg", "selector"];
     const values = order.filter((key) => encoding[key] !== undefined).map((key) => `${key}=${encoding[key]}`);
     return `${encoding.scheme || "arm_system"}:${values.join(":")}:${reg.name || "register"}`;
@@ -517,7 +750,12 @@
   function getDisplayRegisters() {
     const source = getRegisters();
     if (isSystemChip()) {
-      return source.map((reg, sourceIndex) => ({ ...reg, _sourceRegisterIndex: sourceIndex, _displayOrder: sourceIndex }));
+      return source.map((reg, sourceIndex) => ({
+        ...reg,
+        _pageName: state.pageName,
+        _sourceRegisterIndex: sourceIndex,
+        _displayOrder: sourceIndex,
+      }));
     }
     const physical = source
       .map((reg, sourceIndex) => ({ reg, sourceIndex }))
@@ -553,12 +791,34 @@
     );
   }
 
+  function getAllSystemRegisters() {
+    return Object.entries(getPages(getChip())).flatMap(([pageName, page], pageIndex) => {
+      const registers = Array.isArray(page.registers) ? page.registers : [];
+      return registers.map((reg, sourceIndex) => ({
+        ...reg,
+        _pageName: pageName,
+        _systemPageIndex: pageIndex,
+        _sourceRegisterIndex: sourceIndex,
+        _displayOrder: sourceIndex,
+      }));
+    });
+  }
+
+  function isGlobalSystemSearchActive() {
+    return isSystemChip() && state.view === "table" && Boolean(state.query.trim());
+  }
+
+  function getTableRegisters() {
+    return isGlobalSystemSearchActive() ? getAllSystemRegisters() : getDisplayRegisters();
+  }
+
   function getRegisterKey(reg) {
     const chip = getChip();
+    const pageName = getRegisterPageName(reg);
     if (isSystemChip(chip)) {
       return [
         chip?._id || chip?.sensor || "chip",
-        state.pageName || "page",
+        pageName || "page",
         getPersistentRegisterIdentity(reg),
       ].join("::");
     }
@@ -592,7 +852,7 @@
     todo: { label: "待确认", icon: "circle-help" },
   };
 
-  function getRegisterNotes(reg, pageName = state.pageName) {
+  function getRegisterNotes(reg, pageName = getRegisterPageName(reg)) {
     const chip = getChip();
     const notes = Array.isArray(chip?._notes) ? chip._notes : [];
     const targets = [
@@ -1614,23 +1874,84 @@
     return BigInt(Number.parseInt(cleaned, 10));
   }
 
+  function parseVerilogNumericToken(token) {
+    const match = /^(\d+)'([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$/.exec(String(token).trim());
+    if (!match) return null;
+    const base = match[2].toLowerCase();
+    const digits = match[3].replace(/_/g, "").toLowerCase();
+    const radix = { b: 2, o: 8, d: 10, h: 16 }[base];
+    const validDigits = { b: /^[01xz?]+$/, o: /^[0-7xz?]+$/, d: /^[0-9xz?]+$/, h: /^[0-9a-fxz?]+$/ }[base];
+    if (!validDigits.test(digits)) return null;
+
+    if (!/[xz?]/.test(digits)) {
+      const prefix = { b: "0b", o: "0o", d: "", h: "0x" }[base];
+      const value = BigInt(`${prefix}${digits}`);
+      return { from: value, to: value };
+    }
+    if (base === "d") return null;
+
+    let mask = 0n;
+    let value = 0n;
+    for (const digit of digits) {
+      mask *= BigInt(radix);
+      value *= BigInt(radix);
+      if (/[xz?]/.test(digit)) continue;
+      mask += BigInt(radix - 1);
+      value += BigInt(Number.parseInt(digit, radix));
+    }
+    return { mask, match: value };
+  }
+
+  function parseInlineEnumLine(line, fieldWidth) {
+    const text = String(line || "").trim();
+    const verilogToken = "\\d+'[bBoOdDhH][0-9a-fA-F_xXzZ?]+";
+    const numericToken = `(?:${verilogToken}|0[xX][0-9a-fA-F]+|0[bB][01]+|[01]+|\\d+)`;
+    let match = new RegExp(`^(${numericToken})(?:\\s*(?:~|～|\\.\\.|-)\\s*(${numericToken}))?\\s*(?:=|:)\\s*(.+)$`).exec(text);
+    let startToken;
+    let endToken;
+    let description;
+    if (match) {
+      [, startToken, endToken, description] = match;
+    } else {
+      match = new RegExp(`^(${numericToken})\\s+-\\s+(.+)$`).exec(text);
+      if (match) {
+        [, startToken, description] = match;
+      } else {
+        // Some vendor manuals omit the delimiter, for example "8'h8 Start New Configuration".
+        match = new RegExp(`^(${verilogToken})\\s+([A-Z][A-Za-z].+)$`).exec(text);
+        if (!match) return null;
+        [, startToken, description] = match;
+      }
+    }
+
+    const parseToken = (token) => {
+      if (/^\d+'/.test(token)) return parseVerilogNumericToken(token);
+      const value = numericTokenToBigInt(token, fieldWidth);
+      return { from: value, to: value };
+    };
+    try {
+      const start = parseToken(startToken);
+      if (!start) return null;
+      if (endToken) {
+        if ("mask" in start) return null;
+        const end = parseToken(endToken);
+        if (!end || "mask" in end) return null;
+        return { from: start.from, to: end.to, label: `${startToken}..${endToken}`, desc: description.trim() };
+      }
+      return { ...start, label: startToken, desc: description.trim() };
+    } catch {
+      return null;
+    }
+  }
+
   function parseInlineEnums(field) {
     const desc = String(field.desc || "");
     const { width } = parseBits(field.bits);
     const entries = [];
 
     for (const line of desc.split(/\r?\n/)) {
-      const match = line.trim().match(/^((?:0x[0-9a-fA-F]+|[01]+|\d+)(?:\s*[~～-]\s*(?:0x[0-9a-fA-F]+|[01]+|\d+))?)\s*=\s*(.+)$/);
-      if (!match) continue;
-
-      const [startToken, endToken] = match[1].split(/\s*[~～-]\s*/);
-      try {
-        const from = numericTokenToBigInt(startToken, width);
-        const to = endToken ? numericTokenToBigInt(endToken, width) : from;
-        entries.push({ from, to, desc: match[2].trim() });
-      } catch {
-        continue;
-      }
+      const entry = parseInlineEnumLine(line, width);
+      if (entry) entries.push(entry);
     }
 
     return entries;
@@ -1683,14 +2004,25 @@
     return entries;
   }
 
-  function getStructuredEnum(field, value) {
-    for (const item of getFieldEnumEntries(field)) {
+  function getStructuredEnum(field, value, fieldTranslation = null, entries = getFieldEnumEntries(field)) {
+    const matchingEntries = [];
+    for (const item of entries) {
       const matches = "mask" in item ? (value & item.mask) === item.match : value >= item.from && value <= item.to;
       if (matches) {
-        return item.desc;
+        const translation = getValueTranslation(fieldTranslation, item.label, item.condition);
+        matchingEntries.push({ source: item.desc, translation: translation?.desc || "" });
       }
     }
+    if (!matchingEntries.length) return null;
+    const source = Array.from(new Set(matchingEntries.map((item) => item.source))).join("\n");
+    const translated = matchingEntries.map((item) => item.translation).filter(Boolean);
+    const translation = translated.length === matchingEntries.length ? Array.from(new Set(translated)).join("\n") : "";
+    return { source, translation };
+  }
 
+  function getReservedFieldMeaning(field) {
+    const reserved = typeof field.reserved === "string" ? field.reserved.trim() : "";
+    if (reserved) return reserved;
     return "";
   }
 
@@ -1701,8 +2033,7 @@
     return item.from === item.to ? from : `${from}~${to}`;
   }
 
-  function renderEnumList(field, currentValue) {
-    const enums = getFieldEnumEntries(field);
+  function renderEnumList(field, currentValue, fieldTranslation = null, enums = getFieldEnumEntries(field)) {
     if (!enums.length) return "";
 
     const items = enums
@@ -1710,11 +2041,15 @@
         const active = "mask" in item
           ? (currentValue & item.mask) === item.match
           : currentValue >= item.from && currentValue <= item.to;
-        const description = item.condition ? `${item.desc}（${item.condition}）` : item.desc;
+        const translation = getValueTranslation(fieldTranslation, item.label, item.condition);
+        const sourceDescription = item.condition ? `${item.desc}（${item.condition}）` : item.desc;
+        const translatedDescription = translation
+          ? `${translation.desc || item.desc}${translation.condition ? `（${translation.condition}）` : ""}`
+          : "";
         return `
           <span class="enum-chip ${active ? "active" : ""}">
             <code>${escapeHtml(formatEnumKey(item))}</code>
-            <span>${escapeHtml(description)}</span>
+            <span>${renderLocalizedText(sourceDescription, translatedDescription, "localized-inline")}</span>
           </span>
         `;
       })
@@ -1723,10 +2058,11 @@
     return `<div class="enum-list">${items}</div>`;
   }
 
-  function stripEnumLines(desc) {
-    return String(desc || "")
+  function stripEnumLines(field) {
+    const { width } = parseBits(field.bits);
+    return String(field.desc || "")
       .split(/\r?\n/)
-      .filter((line) => !line.trim().match(/^(?:0x[0-9a-fA-F]+|[01]+|\d+)(?:\s*[~～-]\s*(?:0x[0-9a-fA-F]+|[01]+|\d+))?\s*=/))
+      .filter((line) => !parseInlineEnumLine(line, width))
       .join("\n")
       .trim();
   }
@@ -1735,8 +2071,10 @@
     return Boolean(reg.multi_byte || reg.read_clear || reg.no_dump || reg.alias_note || reg.roles);
   }
 
-  function registerMatchesQuery(reg, query, pageName = state.pageName) {
+  function registerMatchesQuery(reg, query, pageName = getRegisterPageName(reg)) {
     if (!query) return true;
+    const pageTranslation = getPageTranslation(pageName);
+    const registerTranslation = getRegisterTranslation(reg, pageName);
     const target = [
       isSystemChip() && !hasSystemMmioAddress(reg) ? formatSystemEncoding(reg) : formatHex(reg.addr),
       reg.name,
@@ -1746,6 +2084,13 @@
       reg.condition,
       reg.execution_state,
       pageName,
+      pageTranslation?.title,
+      pageTranslation?.access,
+      pageTranslation?.desc,
+      registerTranslation?.desc,
+      registerTranslation?.condition,
+      registerTranslation?.alias_note,
+      registerTranslation?.no_dump_reason,
       ...(reg.groups || []),
       ...(reg.aliases || []),
       ...(reg.accessors || []).flatMap((accessor) => [accessor.name, accessor.kind, accessor.instruction, accessor.condition]),
@@ -1753,6 +2098,12 @@
       ...(reg.fields || []).flatMap((field) => [
         field.name, field.bits, field.access, field.reset, field.reset_info, field.condition, field.reserved, field.desc,
       ]),
+      ...((registerTranslation?.fields || []).flatMap((field) => [
+        field.desc,
+        field.condition,
+        field.reset_info,
+        ...(field.values || []).flatMap((value) => [value.desc, value.condition]),
+      ])),
       ...getRegisterNotes(reg, pageName).flatMap((note) => [note.content, noteKinds[note.kind]?.label || note.kind]),
     ]
       .join(" ")
@@ -1760,13 +2111,28 @@
     return target.includes(query);
   }
 
+  function systemRegisterSearchRank(reg, query) {
+    const name = String(reg.name || "").toLowerCase();
+    if (name === query) return 0;
+    if (name.startsWith(query)) return 1;
+    if (name.includes(query)) return 2;
+    const aliases = [...(reg.aliases || []), ...(reg.accessors || []).map((item) => item.name)]
+      .filter(Boolean)
+      .map((item) => String(item).toLowerCase());
+    if (aliases.some((item) => item === query)) return 3;
+    if (aliases.some((item) => item.startsWith(query))) return 4;
+    return 5;
+  }
+
   function summarizePage() {
     const chip = getChip();
     const page = getPage();
+    const translationRoot = getTranslationRoot(chip);
+    const pageTranslation = getPageTranslation(state.pageName, chip);
     const regs = getDisplayRegisters();
     if (!chip || !page) {
       els.chipMeta.textContent = "未加载芯片";
-      els.statusBand.textContent = state.loadMessage || "请选择 YAML 文件或目录";
+      els.statusBand.textContent = currentStatusMessage() || "请选择 YAML 文件或目录";
       return;
     }
 
@@ -1779,19 +2145,41 @@
       );
       const noteCount = Array.isArray(chip._notes) ? chip._notes.length : 0;
       const sourceVersion = chip.source?.version ? ` · ${chip.source.version}` : "";
-      const summary = `全局预览 · ${pages.length} 个架构分类 · ${registerCount} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${sourceVersion}`;
-      els.chipMeta.textContent = `${chip.sensor || "Unknown"} · ${chip._source || "内置数据"}`;
-      els.statusBand.textContent = state.loadMessage ? `${summary} · ${state.loadMessage}` : summary;
+      const translationStatus = translationStatusLabel(chip);
+      const summary = `全局预览 · ${pages.length} 个架构分类 · ${registerCount} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${translationStatus ? ` · ${translationStatus}` : ""}${sourceVersion}`;
+      els.chipMeta.textContent = `${localizedLabel(chip.sensor || "Unknown", translationRoot?.sensor)} · ${chip._source || "内置数据"}`;
+      const statusMessage = currentStatusMessage();
+      els.statusBand.textContent = statusMessage ? `${summary} · ${statusMessage}` : summary;
+      return;
+    }
+
+    if (isGlobalSystemSearchActive()) {
+      const query = state.query.trim().toLowerCase();
+      const allRegisters = getAllSystemRegisters();
+      const matches = allRegisters.filter((reg) => registerMatchesQuery(reg, query));
+      const pageCount = new Set(matches.map(getRegisterPageName)).size;
+      const fieldCount = matches.reduce((sum, reg) => sum + (reg.fields || []).length, 0);
+      const noteCount = matches.reduce((sum, reg) => sum + getRegisterNotes(reg).length, 0);
+      const sourceVersion = chip.source?.version ? ` · ${chip.source.version}` : "";
+      const translationStatus = translationStatusLabel(chip);
+      const summary = `跨全部分类搜索 · ${matches.length}/${allRegisters.length} 个寄存器 · ${pageCount} 个分类 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${translationStatus ? ` · ${translationStatus}` : ""}${sourceVersion}`;
+      els.chipMeta.textContent = `${localizedLabel(chip.sensor || "Unknown", translationRoot?.sensor)} · ${chip._source || "内置数据"}`;
+      const statusMessage = currentStatusMessage();
+      els.statusBand.textContent = statusMessage ? `${summary} · ${statusMessage}` : summary;
       return;
     }
 
     const fieldCount = regs.reduce((sum, reg) => sum + (reg.fields || []).length, 0);
     const noteCount = countPageNotes();
-    els.chipMeta.textContent = `${chip.sensor || "Unknown"} · ${chip._source || "内置数据"}`;
+    els.chipMeta.textContent = `${localizedLabel(chip.sensor || "Unknown", translationRoot?.sensor)} · ${chip._source || "内置数据"}`;
     const pageIdentity = isSystemChip(chip) ? "架构分类" : `page_id ${formatHex(page.page_id)}`;
     const sourceVersion = isSystemChip(chip) && chip.source?.version ? ` · ${chip.source.version}` : "";
-    const summary = `${state.pageName} · ${pageIdentity} · ${page.access || ""} · ${regs.length} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${sourceVersion}`;
-    els.statusBand.textContent = state.loadMessage ? `${summary} · ${state.loadMessage}` : summary;
+    const translationStatus = translationStatusLabel(chip);
+    const pageLabel = localizedLabel(state.pageName, pageTranslation?.title);
+    const pageAccess = localizedLabel(page.access || "", pageTranslation?.access);
+    const summary = `${pageLabel} · ${pageIdentity} · ${pageAccess} · ${regs.length} 个寄存器 · ${fieldCount} 个位域${noteCount ? ` · ${noteCount} 条备注` : ""}${translationStatus ? ` · ${translationStatus}` : ""}${sourceVersion}`;
+    const statusMessage = currentStatusMessage();
+    els.statusBand.textContent = statusMessage ? `${summary} · ${statusMessage}` : summary;
   }
 
   function getAccessClass(regs) {
@@ -1861,8 +2249,8 @@
       const active = pageName === state.pageName;
       indexItems.push(`
         <button class="system-overview-index-item ${active ? "active" : ""}" type="button"
-          data-system-group-index="${pageIndex}" title="${escapeHtml(pageName)}">
-          <span>${escapeHtml(pageName)}</span><strong>${matching.length}</strong>
+          data-system-group-index="${pageIndex}" title="${escapeHtml(localizedLabel(pageName, getPageTranslation(pageName, chip)?.title))}">
+          <span>${escapeHtml(localizedLabel(pageName, getPageTranslation(pageName, chip)?.title))}</span><strong>${matching.length}</strong>
         </button>
       `);
 
@@ -1870,6 +2258,7 @@
         const access = String(reg.access || "");
         const locator = hasSystemMmioAddress(reg) ? formatRange(reg) : formatSystemEncoding(reg);
         const noteCount = getRegisterNotes(reg, pageName).length;
+        const registerTranslation = getRegisterTranslation(reg, pageName, chip);
         const special = hasSpecialBehavior(reg);
         const classes = [
           "system-overview-register",
@@ -1878,7 +2267,12 @@
           special ? "has-special" : "",
           noteCount ? "has-note" : "",
         ].filter(Boolean).join(" ");
-        const tooltip = [reg.name, locator, reg.desc, reg.condition].filter(Boolean).join("\n");
+        const tooltip = [
+          reg.name,
+          locator,
+          translatedString(reg.desc, registerTranslation?.desc),
+          translatedString(reg.condition, registerTranslation?.condition),
+        ].filter(Boolean).join("\n");
         return `
           <button class="${classes}" type="button" data-system-page-index="${pageIndex}"
             data-system-register-index="${registerIndex}" title="${escapeHtml(tooltip)}"
@@ -1896,7 +2290,7 @@
       sections.push(`
         <section id="system-overview-group-${pageIndex}" class="system-overview-group ${active ? "active" : ""}">
           <div class="system-overview-group-head">
-            <h3>${escapeHtml(pageName)}</h3>
+            <h3>${escapeHtml(localizedLabel(pageName, getPageTranslation(pageName, chip)?.title))}</h3>
             <span>${matching.length}/${registers.length}</span>
           </div>
           <div class="system-overview-register-grid">${tiles}</div>
@@ -2051,14 +2445,22 @@
         const bits = parseBits(field.bits);
         const fieldValue = extractFieldValue(valueInfo.value, field);
         const isSet = fieldValue !== 0n;
-        const meaning = getStructuredEnum(field, fieldValue);
-        const desc = stripEnumLines(field.desc || "");
+        const fieldTranslation = getFieldTranslation(field, reg);
+        const enumEntries = getFieldEnumEntries(field);
+        const meaning = getStructuredEnum(field, fieldValue, fieldTranslation, enumEntries);
+        const desc = stripEnumLines(field);
+        const translatedDesc = fieldTranslation?.desc || "";
+        const reservedMeaning = enumEntries.length ? "" : getReservedFieldMeaning(field);
+        const descriptionIsMeaning = !enumEntries.length && !reservedMeaning && Boolean(desc || translatedDesc);
+        const descriptionMarkup = (desc || translatedDesc)
+          ? `<div class="field-desc">${renderLocalizedText(desc, translatedDesc)}</div>`
+          : "";
         const valueLabel = `${formatBigIntHex(fieldValue, bits.width)} / ${fieldValue.toString(10)}`;
-        const enumList = renderEnumList(field, fieldValue);
+        const enumList = renderEnumList(field, fieldValue, fieldTranslation, enumEntries);
         const fieldAccess = field.access ? `<span class="field-access">${escapeHtml(field.access)}</span>` : "";
         const fieldReset = formatReset(field.reset, bits.width);
-        const condition = field.condition ? `<div class="field-condition"><i data-lucide="git-branch"></i><span>${escapeHtml(field.condition)}</span></div>` : "";
-        const resetInfo = field.reset_info ? `<div class="field-desc"><strong>Reset:</strong> ${escapeHtml(field.reset_info)}</div>` : "";
+        const condition = field.condition ? `<div class="field-condition"><i data-lucide="git-branch"></i><span>${renderLocalizedText(field.condition, fieldTranslation?.condition, "localized-inline")}</span></div>` : "";
+        const resetInfo = field.reset_info ? `<div class="field-desc"><strong>Reset:</strong> ${renderLocalizedText(field.reset_info, fieldTranslation?.reset_info, "localized-inline")}</div>` : "";
         const accessRules = Array.isArray(field.access_rules) && field.access_rules.length
           ? `<div class="field-desc"><strong>Access:</strong> ${field.access_rules.map((rule) => escapeHtml(rule.condition ? `${rule.access} · ${rule.condition}` : rule.access)).join("<br>")}</div>`
           : "";
@@ -2068,10 +2470,16 @@
             <div class="field-bits">[${escapeHtml(field.bits)}]${fieldReset ? `<br>reset ${escapeHtml(fieldReset)}` : ""}</div>
             <div class="field-value">${escapeHtml(valueLabel)}</div>
             <div class="field-meaning">
-              ${meaning ? `<strong>${escapeHtml(meaning)}</strong>` : `<span class="muted">未匹配枚举</span>`}
+              ${meaning
+                ? `<strong>${renderLocalizedText(meaning.source, meaning.translation, "localized-inline")}</strong>`
+                : enumEntries.length
+                  ? `<span class="muted">资料未定义当前值</span>`
+                  : reservedMeaning
+                    ? `<strong>${escapeHtml(reservedMeaning)}</strong>`
+                    : descriptionMarkup}
               ${condition}
               ${enumList}
-              ${desc && !compact ? `<div class="field-desc">${escapeHtml(desc).replace(/\n/g, "<br>")}</div>` : ""}
+              ${descriptionIsMeaning || compact ? "" : descriptionMarkup}
               ${compact ? "" : resetInfo}
               ${compact ? "" : accessRules}
             </div>
@@ -2084,6 +2492,7 @@
   function renderRegisterBlock(reg, compact = false) {
     const valueInfo = getRegisterValue(reg);
     const key = getRegisterKey(reg);
+    const registerTranslation = getRegisterTranslation(reg);
     return `
       <div class="register-block register-display" data-register-key="${escapeHtml(key)}">
         <div class="register-heading">
@@ -2094,9 +2503,10 @@
           ${renderBadges(reg)}
         </div>
         ${renderRegisterValueEditor(reg, false)}
-        <div class="register-desc">${escapeHtml(reg.desc || "").replace(/\n/g, "<br>")}</div>
-        ${reg.condition ? `<div class="register-desc system-condition"><i data-lucide="git-branch"></i> ${escapeHtml(reg.condition)}</div>` : ""}
-        ${reg.alias_note ? `<div class="register-desc"><span class="badge">alias</span> ${escapeHtml(reg.alias_note)}</div>` : ""}
+        <div class="register-desc">${renderLocalizedText(reg.desc || "", registerTranslation?.desc)}</div>
+        ${reg.condition ? `<div class="register-desc system-condition"><i data-lucide="git-branch"></i> ${renderLocalizedText(reg.condition, registerTranslation?.condition, "localized-inline")}</div>` : ""}
+        ${reg.alias_note ? `<div class="register-desc"><span class="badge">alias</span> ${renderLocalizedText(reg.alias_note, registerTranslation?.alias_note, "localized-inline")}</div>` : ""}
+        ${reg.no_dump_reason ? `<div class="register-desc"><span class="badge warn">no-dump</span> ${renderLocalizedText(reg.no_dump_reason, registerTranslation?.no_dump_reason, "localized-inline")}</div>` : ""}
         ${renderRegisterNotes(reg)}
         <div class="bit-lane-slot">${renderBitLane(reg, valueInfo)}</div>
         <div class="field-list" data-compact="${compact ? "true" : "false"}">${renderFieldRows(reg, compact)}</div>
@@ -2311,8 +2721,9 @@
   function renderSystemRegisterDetails(reg) {
     if (!isSystemChip()) return "";
     const accessors = Array.isArray(reg.accessors) ? reg.accessors : [];
+    const registerTranslation = getRegisterTranslation(reg);
     return `
-      ${reg.condition ? `<div class="system-condition"><i data-lucide="git-branch"></i><span>${escapeHtml(reg.condition)}</span></div>` : ""}
+      ${reg.condition ? `<div class="system-condition"><i data-lucide="git-branch"></i><span>${renderLocalizedText(reg.condition, registerTranslation?.condition, "localized-inline")}</span></div>` : ""}
       ${accessors.length ? `<div class="system-accessors">${accessors.map((item) => `
         <div><span class="badge">${escapeHtml(item.kind === "read" ? "READ" : item.kind === "write" ? "WRITE" : "IMPLICIT")}</span><code>${escapeHtml(item.instruction)}</code>${item.condition ? `<span>${escapeHtml(item.condition)}</span>` : ""}</div>
       `).join("")}</div>` : ""}
@@ -2320,15 +2731,28 @@
   }
 
   function renderTable() {
-    const regs = getDisplayRegisters();
+    const globalSystemSearch = isGlobalSystemSearchActive();
+    const regs = getTableRegisters();
     const query = state.query.trim().toLowerCase();
-    const rows = regs.filter((reg) => registerMatchesQuery(reg, query));
+    const matchingRows = regs.filter((reg) => registerMatchesQuery(reg, query));
+    if (globalSystemSearch) {
+      matchingRows.sort((left, right) => (
+        systemRegisterSearchRank(left, query) - systemRegisterSearchRank(right, query) ||
+        left._systemPageIndex - right._systemPageIndex ||
+        left._displayOrder - right._displayOrder
+      ));
+    }
+    const rows = globalSystemSearch ? matchingRows.slice(0, SYSTEM_SEARCH_RESULT_LIMIT) : matchingRows;
 
     const noteCount = rows.reduce((count, reg) => count + getRegisterNotes(reg).length, 0);
     const locatorType = isSystemChip()
       ? (regs.some((reg) => hasSystemMmioAddress(reg)) ? "系统编码 / MMIO 地址" : "结构化系统编码")
       : "MMIO 地址";
-    els.tableSummary.textContent = `${rows.length}/${regs.length} 个寄存器匹配 · ${noteCount} 条备注 · ${locatorType} · 每个寄存器独立保存输入值`;
+    const resultLimit = matchingRows.length > rows.length ? ` · 显示前 ${rows.length} 条，请继续缩小范围` : "";
+    const searchScope = globalSystemSearch
+      ? ` · 跨 ${new Set(matchingRows.map(getRegisterPageName)).size} 个分类搜索`
+      : "";
+    els.tableSummary.textContent = `${matchingRows.length}/${regs.length} 个寄存器匹配${resultLimit}${searchScope} · ${noteCount} 条备注 · ${locatorType} · 每个寄存器独立保存输入值`;
 
     if (!rows.length) {
       els.tableBody.innerHTML = `<tr><td colspan="6"><div class="empty-state">没有匹配的寄存器</div></td></tr>`;
@@ -2338,6 +2762,9 @@
     els.tableBody.innerHTML = rows
       .map((reg) => {
         const key = getRegisterKey(reg);
+        const registerTranslation = getRegisterTranslation(reg);
+        const pageName = getRegisterPageName(reg);
+        const pageLabel = localizedLabel(pageName, getPageTranslation(pageName)?.title);
         return `
         <tr class="register-display" data-register-key="${escapeHtml(key)}">
           <td class="addr-cell">${renderRegisterLocator(reg)}</td>
@@ -2346,14 +2773,21 @@
               <strong>${escapeHtml(reg.name)}</strong>
               ${renderNoteEditButton(reg)}
             </div>
+            ${globalSystemSearch ? `
+              <button class="register-page-link" type="button" data-register-page-link data-register-key="${escapeHtml(key)}"
+                title="只浏览 ${escapeHtml(pageLabel)} 分类">
+                <i data-lucide="folder-open"></i><span>${escapeHtml(pageLabel)}</span>
+              </button>
+            ` : ""}
             <div class="cell-badges">${renderBadges(reg)}</div>
           </td>
           <td>${escapeHtml(reg.access || "")}<br><span class="field-bits">${getBitWidth(reg)} bit</span></td>
           <td class="value-cell">${renderRegisterValueEditor(reg, true)}</td>
           <td class="desc-cell">
-            ${escapeHtml(reg.desc || "").replace(/\n/g, "<br>")}
+            ${renderLocalizedText(reg.desc || "", registerTranslation?.desc)}
             ${renderSystemRegisterDetails(reg)}
-            ${reg.alias_note ? `<div class="field-desc">${escapeHtml(reg.alias_note)}</div>` : ""}
+            ${reg.alias_note ? `<div class="field-desc">${renderLocalizedText(reg.alias_note, registerTranslation?.alias_note)}</div>` : ""}
+            ${reg.no_dump_reason ? `<div class="field-desc">${renderLocalizedText(reg.no_dump_reason, registerTranslation?.no_dump_reason)}</div>` : ""}
             ${renderRegisterNotes(reg)}
           </td>
           <td class="fields-cell"><div class="field-list" data-compact="false">${renderFieldRows(reg, false)}</div></td>
@@ -2365,7 +2799,25 @@
   }
 
   function findRegisterByKey(key) {
-    return getDisplayRegisters().find((reg) => getRegisterKey(reg) === key) || null;
+    return getTableRegisters().find((reg) => getRegisterKey(reg) === key) || null;
+  }
+
+  function handleRegisterPageLink(event) {
+    const button = event.target.closest("[data-register-page-link]");
+    if (!button) return false;
+    const reg = findRegisterByKey(button.dataset.registerKey);
+    if (!reg) return true;
+
+    const pageName = getRegisterPageName(reg);
+    const identity = getPersistentRegisterIdentity(reg);
+    state.pageName = pageName;
+    state.query = "";
+    els.searchInput.value = "";
+    populatePageSelect();
+    render();
+    replaceNavigationState({ focusIdentity: identity, fromSystemOverview: false });
+    window.requestAnimationFrame(() => revealSystemRegister(identity, { focus: true }));
+    return true;
   }
 
   function refreshRegisterValueDisplays(reg, key, sourceInput) {
@@ -2415,6 +2867,7 @@
   function render() {
     hideHoverPanel();
     syncSystemOverviewStickyMetrics();
+    updateLanguageControl();
     setView(state.view);
     updateAttachmentsButton();
     summarizePage();
@@ -2439,26 +2892,24 @@
     chip._id = record.id;
     chip._libraryId = record.id;
     chip._source = record.sourceName;
+    chip._sourceSha256 = record.sourceSha256 || chip._sourceSha256 || "";
     chip._category = record.category || fallbackCategory(record);
     chip._builtin = Boolean(record.builtin);
     chip._notes = Array.isArray(record.notes) ? record.notes : Array.isArray(chip._notes) ? chip._notes : [];
     chip._attachments = Array.isArray(record.attachments) ? record.attachments : [];
+    chip._translations = Array.isArray(record.translations)
+      ? record.translations.map(translationDocumentFromRecord).filter(Boolean)
+      : Array.isArray(chip._translations) ? chip._translations : [];
     return chip;
   }
 
   function applyLibraryRecords(records) {
     const previousChipId = getChip()?._libraryId || getChip()?._id || "";
-    const previousIds = new Set(libraryRecords.map((record) => record.id));
     libraryRecords = Array.isArray(records) ? records : [];
-
-    if (!state.exportSelectionInitialized) {
-      libraryRecords.filter((record) => record.enabled).forEach((record) => state.exportSelection.add(record.id));
-      state.exportSelectionInitialized = true;
-    } else {
-      libraryRecords
-        .filter((record) => record.enabled && !previousIds.has(record.id))
-        .forEach((record) => state.exportSelection.add(record.id));
-    }
+    const currentIds = new Set(libraryRecords.map((record) => record.id));
+    state.librarySelection.forEach((id) => {
+      if (!currentIds.has(id)) state.librarySelection.delete(id);
+    });
 
     const loaded = [];
     const failures = [];
@@ -2497,9 +2948,14 @@
         sourceKind: "builtin",
         sourceName: chip._source || `${id}.yaml`,
         sourcePath: null,
+        sourceSha256: chip._sourceSha256 || "",
         yamlText: "",
         notes: Array.isArray(chip._notes) ? chip._notes : [],
         attachments: [],
+        translations: Array.isArray(chip._translations) ? chip._translations.map((translation) => ({
+          yamlText: "",
+          translationData: translation,
+        })) : [],
         chipData: chip,
       };
     });
@@ -2613,7 +3069,7 @@
     const reg = getActiveNoteRegister();
     if (!reg) return;
     hideHoverPanel();
-    els.noteDialogRegister.textContent = `${state.pageName} · ${formatRange(reg)} · ${reg.name}`;
+    els.noteDialogRegister.textContent = `${getRegisterPageName(reg)} · ${formatRange(reg)} · ${reg.name}`;
     resetNoteEditor();
     renderNoteList();
     els.noteDialog.showModal();
@@ -2657,7 +3113,7 @@
         input: {
           noteId: state.editingNoteId,
           chipId: chip._libraryId || chip._id,
-          pageName: state.pageName,
+          pageName: getRegisterPageName(reg),
           registerAddr: isSystemChip(chip) ? null : Number(reg.addr || 0),
           registerKey: getPersistentRegisterIdentity(reg),
           registerName: reg.name,
@@ -2724,6 +3180,8 @@
     els.attachmentsButton.hidden = !isDesktopApp() || !chip;
     els.attachmentsButtonCount.hidden = count === 0;
     els.attachmentsButtonCount.textContent = String(count);
+    els.toolsMenuBadge.hidden = count === 0 || !isDesktopApp() || !chip;
+    els.toolsMenuBadge.textContent = count > 99 ? "99+" : String(count);
     els.attachmentsButton.title = count ? `当前芯片有 ${count} 个附件` : "当前芯片附件";
   }
 
@@ -2754,7 +3212,7 @@
     const chip = getChip();
     const attachments = getCurrentAttachments();
     if (!chip) return;
-    els.attachmentsDialogChip.textContent = chip.sensor || chip._id || "当前芯片";
+    els.attachmentsDialogChip.textContent = localizedLabel(chip.sensor || chip._id || "当前芯片", getTranslationRoot(chip)?.sensor);
     const available = attachments.filter((attachment) => attachment.exists).length;
     const totalSize = attachments.reduce((sum, attachment) => sum + Number(attachment.sizeBytes || 0), 0);
     const sizeLabel = attachments.length ? formatFileSize(totalSize) : "";
@@ -2795,6 +3253,7 @@
 
   async function openAttachmentsDialog() {
     if (!isDesktopApp() || !getChip()) return;
+    closeToolsMenu(false);
     if (els.noteDialog.open) closeNoteDialog();
     setAttachmentsStatus("");
     renderAttachmentsDialog();
@@ -2867,49 +3326,85 @@
     }
   }
 
-  function renderLibraryList() {
+  function filteredLibraryRecords() {
     const query = state.libraryQuery.trim().toLowerCase();
-    const filtered = libraryRecords.filter((record) =>
-      [record.sensor, record.vendor, record.family, record.category, record.sourceName]
+    return libraryRecords.filter((record) =>
+      [
+        record.sensor,
+        record.vendor,
+        record.family,
+        record.category,
+        record.sourceName,
+        getRecordTranslationDocument(record)?.translations?.sensor,
+        getRecordTranslationDocument(record)?.translations?.family,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(query),
     );
+  }
+
+  function selectedLibraryRecords() {
+    return libraryRecords.filter((record) => state.librarySelection.has(record.id));
+  }
+
+  function renderLibraryList() {
+    const filtered = filteredLibraryRecords();
     const enabledCount = libraryRecords.filter((record) => record.enabled).length;
-    const selectedCount = libraryRecords.filter((record) => state.exportSelection.has(record.id)).length;
+    const selected = selectedLibraryRecords();
+    const selectedCount = selected.length;
+    const removableCount = selected.filter((record) => !record.builtin).length;
     const categories = Array.from(new Set(libraryRecords.map((record) => record.category).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
-    els.librarySummary.textContent = `${libraryRecords.length} 个芯片 · ${enabledCount} 个显示 · ${selectedCount} 个待导出`;
+    els.librarySummary.textContent = `${libraryRecords.length} 个芯片 · ${enabledCount} 个显示 · ${selectedCount} 个已选择`;
+    els.librarySelectionSummary.textContent = selectedCount ? `已选择 ${selectedCount} 个` : "未选择芯片";
     els.categoryOptions.innerHTML = categories.map((category) => `<option value="${escapeHtml(category)}"></option>`).join("");
     els.libraryList.innerHTML = filtered.length
       ? filtered
           .map((record) => {
             const sourceLabel = record.builtin ? "内置" : record.sourceKind === "linked" ? "关联目录" : "已导入";
             const sourceDetail = record.sourcePath || record.sourceName || "";
+            const translation = getRecordTranslationDocument(record);
+            const translatedSensor = translation?.translations?.sensor;
+            const translationLabel = translation?.metadata
+              ? `${translation.metadata.locale || translation.locale} · ${translation.metadata.status === "reviewed" ? "已审校" : "草稿"}`
+              : "仅英文";
             return `
               <div class="library-row ${record.enabled ? "" : "is-disabled"}" data-chip-id="${escapeHtml(record.id)}">
-                <label class="check-control" title="纳入导出">
-                  <input type="checkbox" data-library-action="export" ${state.exportSelection.has(record.id) ? "checked" : ""} aria-label="导出 ${escapeHtml(record.sensor)}">
+                <label class="check-control library-select-control" title="选择芯片">
+                  <input type="checkbox" data-library-action="select" ${state.librarySelection.has(record.id) ? "checked" : ""} aria-label="选择 ${escapeHtml(record.sensor)}">
                 </label>
                 <div class="library-chip-name" title="${escapeHtml(record.sensor)}">
-                  <strong>${escapeHtml(record.sensor)}</strong>
+                  <strong>${escapeHtml(localizedLabel(record.sensor, translatedSensor))}</strong>
                   <span>${escapeHtml(record.vendor || record.family || record.deviceType || "未提供厂商信息")}</span>
+                  <small class="library-translation-status ${translation ? "" : "is-missing"}">${escapeHtml(translationLabel)}</small>
                 </div>
                 <input class="category-input" data-library-action="category" list="categoryOptions" value="${escapeHtml(record.category || fallbackCategory(record))}" aria-label="${escapeHtml(record.sensor)} 的分类">
-                <label class="check-control" title="在主界面显示">
+                <label class="check-control library-enabled-control" title="在主界面显示">
                   <input type="checkbox" data-library-action="enabled" ${record.enabled ? "checked" : ""} aria-label="显示 ${escapeHtml(record.sensor)}">
                 </label>
                 <div class="library-source" title="${escapeHtml(sourceDetail)}">
                   <strong>${sourceLabel}</strong>
                   <span>${escapeHtml(record.sourceName || "")}</span>
                 </div>
-                ${record.builtin ? "<span></span>" : `<button class="icon-button danger" type="button" data-library-action="delete" title="删除 ${escapeHtml(record.sensor)}" aria-label="删除 ${escapeHtml(record.sensor)}"><i data-lucide="trash-2"></i></button>`}
+                ${record.builtin ? `<span class="library-protected" title="内置芯片可隐藏但不可移除"><i data-lucide="shield-check"></i></span>` : `<button class="icon-button danger library-remove-control" type="button" data-library-action="remove" title="从芯片库移除 ${escapeHtml(record.sensor)}" aria-label="从芯片库移除 ${escapeHtml(record.sensor)}"><i data-lucide="trash-2"></i></button>`}
               </div>
             `;
           })
           .join("")
       : `<div class="empty-state">没有匹配的芯片</div>`;
 
+    const filteredSelectedCount = filtered.filter((record) => state.librarySelection.has(record.id)).length;
+    els.librarySelectAll.checked = filtered.length > 0 && filteredSelectedCount === filtered.length;
+    els.librarySelectAll.indeterminate = filteredSelectedCount > 0 && filteredSelectedCount < filtered.length;
+    els.librarySelectAll.disabled = filtered.length === 0;
+    els.libraryBatchCategoryButton.disabled = selectedCount === 0;
+    els.libraryShowSelectedButton.disabled = selectedCount === 0;
+    els.libraryHideSelectedButton.disabled = selectedCount === 0;
+    els.libraryRemoveSelectedButton.disabled = removableCount === 0;
+    els.libraryRemoveSelectedButton.title = removableCount
+      ? `移除 ${removableCount} 个非内置芯片`
+      : selectedCount ? "内置芯片只能隐藏" : "请先选择芯片";
     els.exportSelectedButton.disabled = selectedCount === 0 || !isDesktopApp();
     els.exportSelectedButton.title = isDesktopApp() ? "" : "独立 HTML 导出需要桌面版";
     setLibraryStatus(state.libraryStatus, state.libraryStatusError);
@@ -2917,9 +3412,11 @@
   }
 
   function openLibrary() {
+    closeToolsMenu(false);
     hideHoverPanel();
     state.libraryOpen = true;
     els.libraryBackdrop.hidden = false;
+    els.libraryQuickButton.setAttribute("aria-expanded", "true");
     document.body.classList.add("library-open");
     renderLibraryList();
     window.setTimeout(() => els.librarySearchInput.focus(), 0);
@@ -2928,8 +3425,9 @@
   function closeLibrary() {
     state.libraryOpen = false;
     els.libraryBackdrop.hidden = true;
+    els.libraryQuickButton.setAttribute("aria-expanded", "false");
     document.body.classList.remove("library-open");
-    els.libraryButton.focus({ preventScroll: true });
+    els.libraryQuickButton.focus({ preventScroll: true });
   }
 
   function populateChipSelect() {
@@ -2943,7 +3441,7 @@
       .map(
         ([category, items]) => `
           <optgroup label="${escapeHtml(category)}">
-            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(chip.sensor || chip._id || `Chip ${index + 1}`)}</option>`).join("")}
+            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(localizedLabel(chip.sensor || chip._id || `Chip ${index + 1}`, getTranslationRoot(chip)?.sensor))}</option>`).join("")}
           </optgroup>
         `,
       )
@@ -2957,7 +3455,7 @@
     if (!pages.includes(state.pageName)) {
       state.pageName = pages[0] || "";
     }
-    els.pageSelect.innerHTML = pages.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+    els.pageSelect.innerHTML = pages.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(localizedLabel(name, getPageTranslation(name)?.title))}</option>`).join("");
     els.pageSelect.value = state.pageName;
   }
 
@@ -3002,33 +3500,53 @@
       return;
     }
 
-    let selectedIndex = state.chipIndex;
-    let desktopRecords = null;
-    const failures = [];
-    let loaded = 0;
+    if (typeof window.parseRegisterYaml !== "function" || typeof window.assertRegisterYaml !== "function") {
+      state.loadMessage = "YAML 解析或规范校验器未加载";
+      render();
+      return;
+    }
 
+    const failures = [];
+    const sources = [];
+    const translations = [];
     for (const file of files) {
       try {
-        if (typeof window.parseRegisterYaml !== "function") {
-          throw new Error("前端 YAML 解析器未加载");
-        }
-        if (typeof window.assertRegisterYaml !== "function") {
-          throw new Error("YAML 规范校验器未加载");
-        }
         const text = await readFileText(file);
         const sourceName = file.webkitRelativePath || file.name;
         const data = window.parseRegisterYaml(text);
-        window.assertRegisterYaml(text, data);
-        const chip = normalizeLoadedChip(data, sourceName);
+        const item = { file, text, sourceName, data };
+        if (window.isRegisterTranslationDocument?.(data)) translations.push(item);
+        else sources.push(item);
+      } catch (error) {
+        failures.push(`${file.name}: ${errorMessage(error)}`);
+      }
+    }
+
+    let selectedIndex = state.chipIndex;
+    let selectedSourceSha256 = "";
+    let desktopRecords = null;
+    let loaded = 0;
+    let translated = 0;
+    const sourceContexts = [];
+
+    for (const item of sources) {
+      try {
+        window.assertRegisterYaml(item.text, item.data);
+        const sourceSha256 = await window.sha256RegisterYaml(item.text);
+        const chip = normalizeLoadedChip(item.data, item.sourceName);
+        chip._sourceSha256 = sourceSha256;
+        sourceContexts.push({ sourceSha256, text: item.text, data: item.data, chip });
+        selectedSourceSha256 = sourceSha256;
         if (isDesktopApp()) {
           desktopRecords = await getInvoke()("import_yaml", {
-            sourceName,
-            yamlText: text,
+            sourceName: item.sourceName,
+            yamlText: item.text,
             category: null,
           });
         } else {
           selectedIndex = upsertChip(chip);
           const existingRecord = libraryRecords.findIndex((record) => record.id === chip._id);
+          const previous = existingRecord >= 0 ? libraryRecords[existingRecord] : null;
           const record = {
             id: chip._id,
             sensor: chip.sensor || chip._id,
@@ -3039,11 +3557,16 @@
             enabled: true,
             builtin: false,
             sourceKind: "imported",
-            sourceName,
+            sourceName: item.sourceName,
             sourcePath: null,
-            yamlText: text,
-            notes: [],
-            attachments: [],
+            sourceSha256,
+            yamlText: item.text,
+            notes: previous?.notes || [],
+            attachments: previous?.attachments || [],
+            translations: (previous?.translations || []).filter((translation) => {
+              return translation.sourceSha256 === sourceSha256
+                || translationDocumentFromRecord(translation)?.source_sha256 === sourceSha256;
+            }),
             chipData: chip,
           };
           if (existingRecord >= 0) libraryRecords[existingRecord] = record;
@@ -3051,20 +3574,69 @@
         }
         loaded += 1;
       } catch (error) {
-        failures.push(`${file.name}: ${errorMessage(error)}`);
+        failures.push(`${item.file.name}: ${errorMessage(error)}`);
       }
     }
 
-    if (desktopRecords) {
-      applyLibraryRecords(desktopRecords);
-      const importedIndex = chips.findIndex((chip) => chip._source === (files.at(-1)?.webkitRelativePath || files.at(-1)?.name));
-      state.chipIndex = importedIndex >= 0 ? importedIndex : state.chipIndex;
+    const availableRecords = desktopRecords || libraryRecords;
+    for (const item of translations) {
+      try {
+        if (typeof window.assertRegisterTranslationYaml !== "function") {
+          throw new Error("翻译 YAML 校验器未加载");
+        }
+        const sourceSha256 = String(item.data.source_sha256 || "");
+        const pendingSource = sourceContexts.find((source) => source.sourceSha256 === sourceSha256);
+        const sourceRecord = availableRecords.find((record) => record.sourceSha256 === sourceSha256);
+        const sourceText = pendingSource?.text || sourceRecord?.yamlText || "";
+        const sourceData = pendingSource?.data || sourceRecord?.chipData
+          || (sourceText ? window.parseRegisterYaml(sourceText) : null);
+        if (!sourceText || !sourceData) {
+          throw new Error("找不到与 source_sha256 匹配的英文源 YAML；请先导入对应英文寄存器文件");
+        }
+        await window.assertRegisterTranslationYaml(item.text, item.data, sourceText, sourceData);
+        selectedSourceSha256 = sourceSha256;
+        if (isDesktopApp()) {
+          desktopRecords = await getInvoke()("import_translation", {
+            sourceName: item.sourceName,
+            yamlText: item.text,
+          });
+        } else {
+          const chip = chips.find((candidate) => candidate._sourceSha256 === sourceSha256);
+          if (!chip) throw new Error("英文源 YAML 当前未显示");
+          chip._translations = (chip._translations || []).filter((translation) => translation.locale !== item.data.locale);
+          chip._translations.push(item.data);
+          const record = libraryRecords.find((candidate) => candidate.sourceSha256 === sourceSha256);
+          if (record) {
+            record.translations = (record.translations || []).filter((translation) => {
+              return translationDocumentFromRecord(translation)?.locale !== item.data.locale;
+            });
+            record.translations.push({
+              sourceSha256,
+              sourceFile: item.data.source_file,
+              locale: item.data.locale,
+              yamlText: item.text,
+              translationData: item.data,
+            });
+          }
+        }
+        translated += 1;
+      } catch (error) {
+        failures.push(`${item.file.name}: ${errorMessage(error)}`);
+      }
+    }
+
+    if (desktopRecords) applyLibraryRecords(desktopRecords);
+    if (selectedSourceSha256) {
+      const importedIndex = chips.findIndex((chip) => chip._sourceSha256 === selectedSourceSha256);
+      state.chipIndex = importedIndex >= 0 ? importedIndex : selectedIndex;
     } else {
       state.chipIndex = selectedIndex;
     }
+    const accepted = [loaded ? `${loaded} 个寄存器 YAML` : "", translated ? `${translated} 个译文` : ""].filter(Boolean).join("、");
     state.loadMessage = failures.length
-      ? `已加载 ${loaded} 个，失败 ${failures.length} 个：${failures.join("；")}`
-      : `已加载 ${loaded} 个 YAML`;
+      ? `已加载 ${accepted || "0 个文件"}，失败 ${failures.length} 个：${failures.join("；")}`
+      : `已加载 ${accepted || "0 个文件"}`;
+    if (getTranslationDocument(chips[state.chipIndex])) state.translationNotice = "";
     populateChipSelect();
     populatePageSelect();
     render();
@@ -3073,9 +3645,10 @@
       renderLibraryList();
     }
     if (failures.length) {
+      const failureKind = translations.length && !sources.length ? "译文" : translations.length ? "文件" : "YAML";
       showImportFailures(
-        loaded ? "部分 YAML 未导入" : "YAML 未导入",
-        `已接受 ${loaded} 个，拒绝 ${failures.length} 个。请修正规范问题后重新导入。`,
+        loaded || translated ? `部分${failureKind}未导入` : `${failureKind} 未导入`,
+        `已接受 ${loaded + translated} 个，拒绝 ${failures.length} 个。请修正规范问题后重新导入。`,
         failures,
       );
     }
@@ -3097,15 +3670,23 @@
         return;
       }
       const records = await getInvoke()("list_chips");
+      const accepted = [
+        report.imported ? `${report.imported} 个寄存器 YAML` : "",
+        report.translations ? `${report.translations} 个译文` : "",
+      ].filter(Boolean).join("、") || "0 个文件";
       state.loadMessage = report.failures.length
-        ? `目录导入 ${report.imported} 个，失败 ${report.failures.length} 个`
-        : `目录导入 ${report.imported} 个 YAML`;
-      setLibraryStatus(state.loadMessage, report.failures.length > 0);
+        ? `目录导入 ${accepted}，失败 ${report.failures.length} 个`
+        : `目录导入 ${accepted}`;
       applyLibraryRecords(records);
+      if (getTranslationDocument()) {
+        state.translationNotice = "";
+        render();
+      }
+      setLibraryStatus(state.loadMessage, report.failures.length > 0);
       if (report.failures.length) {
         showImportFailures(
           "部分 YAML 未导入",
-          `目录中已接受 ${report.imported} 个，拒绝 ${report.failures.length} 个。`,
+          `目录中已接受 ${report.imported + (report.translations || 0)} 个，拒绝 ${report.failures.length} 个。`,
           report.failures,
         );
       }
@@ -3125,9 +3706,9 @@
     if (!record) return;
     const action = control.dataset.libraryAction;
 
-    if (action === "export") {
-      if (control.checked) state.exportSelection.add(record.id);
-      else state.exportSelection.delete(record.id);
+    if (action === "select") {
+      if (control.checked) state.librarySelection.add(record.id);
+      else state.librarySelection.delete(record.id);
       renderLibraryList();
       return;
     }
@@ -3161,32 +3742,127 @@
     }
   }
 
-  async function handleLibraryClick(event) {
-    const button = event.target.closest("[data-library-action=\"delete\"]");
+  function closeLibraryRemoveDialog() {
+    state.libraryRemovalIds = [];
+    if (els.libraryRemoveDialog.open) els.libraryRemoveDialog.close();
+  }
+
+  function requestLibraryRemoval(records) {
+    const removable = records.filter((record) => !record.builtin);
+    if (!removable.length) {
+      setLibraryStatus("内置芯片不能移除，可以改为隐藏");
+      renderLibraryList();
+      return;
+    }
+    const noteCount = removable.reduce((count, record) => count + (record.notes?.length || 0), 0);
+    const attachmentCount = removable.reduce((count, record) => count + (record.attachments?.length || 0), 0);
+    const linkedCount = removable.filter((record) => record.sourceKind === "linked").length;
+    state.libraryRemovalIds = removable.map((record) => record.id);
+    els.libraryRemoveSummary.textContent = removable.length === 1
+      ? `将移除 ${removable[0].sensor}`
+      : `将移除 ${removable.length} 个芯片`;
+    els.libraryRemoveList.innerHTML = removable.slice(0, 6)
+      .map((record) => `<li><strong>${escapeHtml(record.sensor)}</strong><span>${escapeHtml(record.category || fallbackCategory(record))}</span></li>`)
+      .join("") + (removable.length > 6 ? `<li><strong>以及另外 ${removable.length - 6} 个芯片</strong></li>` : "");
+    const impacts = [
+      noteCount ? `${noteCount} 条本地备注` : "",
+      attachmentCount ? `${attachmentCount} 个附件关联` : "",
+    ].filter(Boolean);
+    const cleanup = impacts.length ? `同时清除 ${impacts.join("和")}；附件原文件不会被删除。` : "不会删除 YAML 或附件原文件。";
+    const linked = linkedCount ? `其中 ${linkedCount} 个来自关联目录，再次关联该目录时可能重新出现。` : "";
+    els.libraryRemoveImpact.textContent = `${cleanup}${linked}`;
+    els.libraryRemoveDialog.showModal();
+    refreshIcons(els.libraryRemoveDialog);
+    window.setTimeout(() => els.libraryRemoveCancelButton.focus(), 0);
+  }
+
+  async function confirmLibraryRemoval() {
+    const ids = [...state.libraryRemovalIds];
+    if (!ids.length) return;
+    els.libraryRemoveConfirmButton.disabled = true;
+    els.libraryRemoveConfirmButton.querySelector("span").textContent = "正在移除";
+    try {
+      if (isDesktopApp()) {
+        for (const chipId of ids) await getInvoke()("delete_chip", { chipId });
+        applyLibraryRecords(await getInvoke()("list_chips"));
+      } else {
+        applyLibraryRecords(libraryRecords.filter((record) => !ids.includes(record.id)));
+      }
+      ids.forEach((id) => state.librarySelection.delete(id));
+      closeLibraryRemoveDialog();
+      setLibraryStatus(`已从芯片库移除 ${ids.length} 个芯片`);
+      renderLibraryList();
+    } catch (error) {
+      setLibraryStatus(error.message || String(error), true);
+      closeLibraryRemoveDialog();
+      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      renderLibraryList();
+    } finally {
+      els.libraryRemoveConfirmButton.disabled = false;
+      els.libraryRemoveConfirmButton.querySelector("span").textContent = "确认移除";
+    }
+  }
+
+  async function applyLibrarySelectionEnabled(enabled) {
+    const selected = selectedLibraryRecords();
+    if (!selected.length) return;
+    try {
+      selected.forEach((record) => { record.enabled = enabled; });
+      if (isDesktopApp()) {
+        for (const record of selected) {
+          await getInvoke()("set_chip_enabled", { chipId: record.id, enabled });
+        }
+      }
+      applyLibraryRecords(isDesktopApp() ? await getInvoke()("list_chips") : libraryRecords);
+      setLibraryStatus(`${selected.length} 个芯片已${enabled ? "显示" : "隐藏"}`);
+      renderLibraryList();
+    } catch (error) {
+      setLibraryStatus(error.message || String(error), true);
+      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      renderLibraryList();
+    }
+  }
+
+  async function applyLibrarySelectionCategory() {
+    const category = els.libraryBatchCategory.value.trim();
+    const selected = selectedLibraryRecords();
+    if (!selected.length) return;
+    if (!category) {
+      setLibraryStatus("请输入要应用的分类", true);
+      els.libraryBatchCategory.focus();
+      return;
+    }
+    try {
+      selected.forEach((record) => { record.category = category; });
+      if (isDesktopApp()) {
+        for (const record of selected) {
+          await getInvoke()("set_chip_category", { chipId: record.id, category });
+        }
+      }
+      applyLibraryRecords(isDesktopApp() ? await getInvoke()("list_chips") : libraryRecords);
+      els.libraryBatchCategory.value = "";
+      setLibraryStatus(`${selected.length} 个芯片已归入 ${category}`);
+      renderLibraryList();
+    } catch (error) {
+      setLibraryStatus(error.message || String(error), true);
+      if (isDesktopApp()) applyLibraryRecords(await getInvoke()("list_chips"));
+      renderLibraryList();
+    }
+  }
+
+  function handleLibraryClick(event) {
+    const button = event.target.closest("[data-library-action=\"remove\"]");
     const row = event.target.closest("[data-chip-id]");
     if (!button || !row) return;
     const record = libraryRecords.find((item) => item.id === row.dataset.chipId);
     if (!record || record.builtin) return;
 
-    try {
-      if (isDesktopApp()) {
-        await getInvoke()("delete_chip", { chipId: record.id });
-        applyLibraryRecords(await getInvoke()("list_chips"));
-      } else {
-        applyLibraryRecords(libraryRecords.filter((item) => item.id !== record.id));
-      }
-      state.exportSelection.delete(record.id);
-      setLibraryStatus(`${record.sensor} 已删除`);
-      renderLibraryList();
-    } catch (error) {
-      setLibraryStatus(error.message || String(error), true);
-      renderLibraryList();
-    }
+    requestLibraryRemoval([record]);
   }
 
   async function exportSelectedChips() {
     const chipIds = libraryRecords
-      .filter((record) => state.exportSelection.has(record.id))
+      .filter((record) => state.librarySelection.has(record.id))
       .map((record) => record.id);
     if (!chipIds.length || !isDesktopApp()) return;
 
@@ -3212,9 +3888,9 @@
     els.matrixViewButton.title = matrixLabel;
     els.matrixViewButton.setAttribute("aria-label", matrixLabel);
     els.matrixTitle.textContent = system ? "全局预览" : "地址矩阵";
-    els.searchInput.placeholder = system && resolvedView === "matrix"
+    els.searchInput.placeholder = system
       ? "全部分类 / 编码 / 名称 / 字段"
-      : "地址 / 编码 / 名称 / 字段";
+      : "地址 / 名称 / 字段";
     els.registerLocatorHeader.textContent = system
       ? (getRegisters().some((reg) => hasSystemMmioAddress(reg)) ? "系统编码 / 地址" : "系统编码")
       : "地址";
@@ -3263,6 +3939,23 @@
   }
 
   function bindEvents() {
+    els.toolsMenuButton.addEventListener("click", () => {
+      if (state.toolsMenuOpen) closeToolsMenu();
+      else openToolsMenu();
+    });
+    els.toolsMenu.addEventListener("keydown", (event) => {
+      if (event.defaultPrevented) return;
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const items = visibleToolsMenuItems();
+      const currentIndex = items.indexOf(document.activeElement);
+      let nextIndex = currentIndex;
+      if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = items.length - 1;
+      else if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+      else nextIndex = (currentIndex - 1 + items.length) % items.length;
+      items[nextIndex]?.focus();
+    });
     els.themeButton.addEventListener("click", () => {
       if (state.themeMenuOpen) closeThemeMenu();
       else openThemeMenu();
@@ -3271,7 +3964,8 @@
       const option = event.target.closest("[data-theme-option]");
       if (!option) return;
       applyTheme(option.dataset.themeOption);
-      closeThemeMenu(true);
+      closeThemeMenu(false);
+      closeToolsMenu(true);
     });
     els.themeMenu.addEventListener("keydown", (event) => {
       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -3286,6 +3980,7 @@
     });
     document.addEventListener("click", (event) => {
       if (state.themeMenuOpen && !els.themePicker.contains(event.target)) closeThemeMenu();
+      if (state.toolsMenuOpen && !els.toolsMenuPicker.contains(event.target)) closeToolsMenu();
     });
     const handleSystemThemeChange = () => {
       if (state.themePreference === "system") applyTheme("system", false);
@@ -3294,14 +3989,17 @@
     else systemThemeMedia?.addListener?.(handleSystemThemeChange);
 
     els.loadYamlButton.addEventListener("click", () => {
+      closeToolsMenu(false);
       els.yamlFileInput.click();
     });
 
     els.loadFolderButton.addEventListener("click", () => {
+      closeToolsMenu(false);
       importDirectory();
     });
 
     els.libraryButton.addEventListener("click", openLibrary);
+    els.libraryQuickButton.addEventListener("click", openLibrary);
     els.attachmentsButton.addEventListener("click", openAttachmentsDialog);
     els.attachmentsDialogCloseButton.addEventListener("click", closeAttachmentsDialog);
     els.attachmentsDialog.addEventListener("cancel", (event) => {
@@ -3464,6 +4162,26 @@
     els.libraryImportButton.addEventListener("click", () => els.yamlFileInput.click());
     els.libraryFolderButton.addEventListener("click", importDirectory);
     els.exportSelectedButton.addEventListener("click", exportSelectedChips);
+    els.librarySelectAll.addEventListener("change", () => {
+      filteredLibraryRecords().forEach((record) => {
+        if (els.librarySelectAll.checked) state.librarySelection.add(record.id);
+        else state.librarySelection.delete(record.id);
+      });
+      renderLibraryList();
+    });
+    els.libraryBatchCategoryButton.addEventListener("click", applyLibrarySelectionCategory);
+    els.libraryBatchCategory.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") applyLibrarySelectionCategory();
+    });
+    els.libraryShowSelectedButton.addEventListener("click", () => applyLibrarySelectionEnabled(true));
+    els.libraryHideSelectedButton.addEventListener("click", () => applyLibrarySelectionEnabled(false));
+    els.libraryRemoveSelectedButton.addEventListener("click", () => requestLibraryRemoval(selectedLibraryRecords()));
+    els.libraryRemoveCancelButton.addEventListener("click", closeLibraryRemoveDialog);
+    els.libraryRemoveConfirmButton.addEventListener("click", confirmLibraryRemoval);
+    els.libraryRemoveDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeLibraryRemoveDialog();
+    });
     els.librarySearchInput.addEventListener("input", () => {
       state.libraryQuery = els.librarySearchInput.value;
       renderLibraryList();
@@ -3489,6 +4207,7 @@
       closeAttachmentsDialog();
       state.chipIndex = Number(els.chipSelect.value);
       state.loadMessage = "";
+      state.translationNotice = "";
       populatePageSelect();
       render();
     });
@@ -3508,6 +4227,19 @@
 
     els.searchInput.addEventListener("input", () => {
       state.query = els.searchInput.value.trim().toLowerCase();
+      render();
+    });
+
+    els.languageControl.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-language-mode]");
+      if (!button) return;
+      const mode = button.dataset.languageMode;
+      setLanguageMode(mode);
+      state.translationNotice = mode !== "en" && !getTranslationDocument()
+        ? "当前芯片未加载中文译文，已回退显示英文。请导入翻译 sidecar，或关联寄存器库目录。"
+        : "";
+      populateChipSelect();
+      populatePageSelect();
       render();
     });
 
@@ -3552,14 +4284,17 @@
     });
 
     els.tableBody.addEventListener("input", handleRegisterValueInput);
-    els.tableBody.addEventListener("click", handleNoteEditButton);
+    els.tableBody.addEventListener("click", (event) => {
+      if (handleRegisterPageLink(event)) return;
+      handleNoteEditButton(event);
+    });
 
     document.addEventListener("click", (event) => {
       if (els.hoverPanel.hidden) return;
       if (els.hoverPanel.contains(event.target)) return;
       if (els.radixDialog.contains(event.target)) return;
       if (event.target.closest("#matrixGrid .has-register")) return;
-      if (event.target.closest("dialog[open], .library-backdrop:not([hidden]), .theme-menu, .theme-button")) return;
+      if (event.target.closest("dialog[open], .library-backdrop:not([hidden]), .theme-menu, .theme-button, .tools-menu, .tools-menu-button")) return;
       hideHoverPanel();
     });
 
@@ -3569,7 +4304,11 @@
           closeThemeMenu(true);
           return;
         }
-        if (els.noteDialog.open || els.attachmentsDialog.open || els.importResultDialog.open) return;
+        if (state.toolsMenuOpen) {
+          closeToolsMenu(true);
+          return;
+        }
+        if (els.noteDialog.open || els.attachmentsDialog.open || els.importResultDialog.open || els.libraryRemoveDialog.open) return;
         if (!els.radixDialog.hidden) {
           closeRadixDialog();
           return;
@@ -3591,6 +4330,8 @@
   function init() {
     window.jsep?.addBinaryOp("//", 10);
     applyTheme(readStoredTheme(), false);
+    setLanguageMode(readStoredLanguageMode(), false);
+    renderToolsMenu();
     bindEvents();
     populateChipSelect();
     populatePageSelect();

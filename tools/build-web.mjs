@@ -8,7 +8,7 @@ await rm(dist, { recursive: true, force: true });
 await mkdir(resolve(dist, "data"), { recursive: true });
 await mkdir(resolve(dist, "vendor"), { recursive: true });
 
-for (const file of ["index.html", "styles.css", "yaml-lite.js", "yaml-validator.js", "app.js"]) {
+for (const file of ["index.html", "styles.css", "yaml-lite.js", "yaml-validator.js", "translation-validator.js", "app.js"]) {
   await cp(resolve(root, file), resolve(dist, file));
 }
 

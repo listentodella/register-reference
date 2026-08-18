@@ -79,6 +79,39 @@ node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js arm-cm
 npm run test:arm-import
 ```
 
+## RISC-V 官方 CSR 数据
+
+RISC-V 架构 CSR 优先使用公开的 [RISC-V Unified Database](https://github.com/riscv-software-src/riscv-unified-db)，不从 Privileged ISA PDF 手工重建。输入目录必须包含 `spec/std/isa/csr`，并固定记录实际使用的 Git commit：
+
+```bash
+npm run riscv:import -- <riscv-unified-db目录> \
+  --xlen 32 \
+  --output riscv-rv32-csr.yaml \
+  --version <snapshot-date> \
+  --revision <git-commit>
+
+npm run riscv:import -- <riscv-unified-db目录> \
+  --xlen 64 \
+  --output riscv-rv64-csr.yaml \
+  --version <snapshot-date> \
+  --revision <git-commit>
+```
+
+- 使用 schema v2、`register_space.kind: riscv_system` 和 `encoding.scheme: riscv_csr`；`encoding.address` 是 12-bit CSR 编号，不是 MMIO `addr`。
+- RV32 和 RV64 必须分开生成。RV32 保留 `mcycleh`、`minstreth` 等高半 CSR；对共享的 64-bit CSR 条目只显示当前 XLEN 可见的低 32 bit。
+- 静态 `RO-H`、`RW-R`、`RW-H`、`RW-RH` 不得降级为普通 `RO/RW`。动态 `type()`、`reset_value()`、参数条件和 `sw_write(csr_value)` 必须保留到对应元数据，不能自行求值。
+- Unified Database 的条件描述可能是文本数组；生成结果不得出现 `[object Object]`，必须同时保留正文和 `when()` 条件。
+- `spec/std/isa/csr` 当前源文件使用 BSD-3-Clause-Clear。生成文件和数据仓库必须保留提交号、逐条 `source_ref`、版权聚合 notice 和许可证全文；不要把其他目录的许可笼统套到 CSR 数据上。
+- Unified Database 明确标记数据仍在快速演进。每次更新都要重新统计寄存器/字段数量并跑完整校验，不能假定不同提交之间 schema 稳定。
+
+导入器回归测试：
+
+```bash
+npm run test:riscv-import
+python3 .agents/skills/register-yaml-generator/scripts/validate_register_yaml.py --strict riscv-rv32-csr.yaml riscv-rv64-csr.yaml
+node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js riscv-rv32-csr.yaml riscv-rv64-csr.yaml
+```
+
 ## 质量规则
 
 - 以 datasheet 为事实来源；不要根据相邻型号或常识补值。

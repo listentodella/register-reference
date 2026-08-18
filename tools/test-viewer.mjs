@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +29,30 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
 
   await page.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  const toolbarLayout = await page.evaluate(() => ({
+    pageWidth: document.documentElement.scrollWidth,
+    languageWidth: document.getElementById("languageControl").getBoundingClientRect().width,
+    viewWidth: document.querySelector(".segmented").getBoundingClientRect().width,
+    commandWidths: Array.from(document.querySelectorAll(".toolbar > .tool-button:not([hidden])"), (button) => button.getBoundingClientRect().width),
+  }));
+  assert.equal(toolbarLayout.pageWidth, 1280, "toolbar should not create horizontal page overflow");
+  assert.ok(toolbarLayout.languageWidth >= 120, "language control should remain fully visible");
+  assert.ok(toolbarLayout.viewWidth >= 70, "view control should remain fully visible");
+  assert.ok(toolbarLayout.commandWidths.every((width) => width >= 34), "toolbar commands should remain clickable");
+  assert.equal(await page.locator("#languageControl").getAttribute("data-translation-available"), "false");
+  assert.match(await page.locator("#languageSwitcher").getAttribute("title"), /未加载中文译文/);
+  assert.equal(await page.locator("#loadYamlButton").isVisible(), false, "low-frequency data actions should start in the overflow menu");
+  await page.locator("#toolsMenuButton").click();
+  assert.equal(await page.locator("#toolsMenu").isVisible(), true);
+  assert.equal(await page.locator("#loadFolderButton strong").innerText(), "关联寄存器库");
+  assert.match(await page.locator("#translationAvailability").innerText(), /当前芯片仅英文/);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#toolsMenu").isHidden(), true);
+  await page.locator("[data-language-mode='zh']").click();
+  assert.match(await page.locator("#statusBand").innerText(), /当前芯片未加载中文译文.*回退显示英文/);
+  await page.locator("[data-language-mode='en']").click();
+  assert.doesNotMatch(await page.locator("#statusBand").innerText(), /当前芯片未加载中文译文/);
+  await page.locator("[data-language-mode='bilingual']").click();
   assert.equal(await page.locator("#matrixViewButton").innerText(), "");
   assert.equal(await page.locator("#tableViewButton").innerText(), "");
   assert.equal(await page.locator("#matrixViewButton svg").count(), 1);
@@ -272,7 +297,11 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForSelector("#radixDialog", { state: "hidden" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
-  await page.locator("#themeButton").click();
+  const openThemePicker = async () => {
+    if (await page.locator("#toolsMenu").isHidden()) await page.locator("#toolsMenuButton").click();
+    await page.locator("#themeButton").click();
+  };
+  await openThemePicker();
   await page.waitForFunction(() => document.activeElement?.dataset.themeOption === "light");
   await page.keyboard.press("ArrowDown");
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.themeOption), "dark");
@@ -282,23 +311,23 @@ try {
   assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(20, 22, 24)");
   await page.reload({ waitUntil: "load" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-  await page.locator("#themeButton").click();
+  await openThemePicker();
   await page.locator('[data-theme-option="rusty"]').click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
   assert.equal(await page.evaluate(() => localStorage.getItem("register-reference.theme")), "rusty");
   assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(28, 29, 31)");
   await page.reload({ waitUntil: "load" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
-  await page.locator("#themeButton").click();
+  await openThemePicker();
   await page.locator('[data-theme-option="contrast"]').click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "contrast");
   await page.emulateMedia({ colorScheme: "dark" });
-  await page.locator("#themeButton").click();
+  await openThemePicker();
   await page.locator('[data-theme-option="system"]').click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.emulateMedia({ colorScheme: "light" });
   await page.waitForFunction(() => document.documentElement.dataset.theme === "light");
-  await page.locator("#themeButton").click();
+  await openThemePicker();
   await page.locator('[data-theme-option="light"]').click();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
 
@@ -371,6 +400,9 @@ pages:
             bits: "7:4"
             desc: "Conditional layout B"
             condition: "Layout: !IsFeatureImplemented(FEAT_A)"
+          - name: "N"
+            bits: "8"
+            desc: "Negative condition flag. Set to 1 if the result of the last flag-setting instruction was negative."
 `;
   await page.locator("#yamlFileInput").setInputFiles({
     name: "arm-ui-test.yaml",
@@ -379,6 +411,63 @@ pages:
   });
   await page.waitForFunction(() => Array.from(document.querySelectorAll("#chipSelect option")).some((option) => option.textContent === "ARM_UI_TEST"));
   assert.equal(await page.locator("#chipSelect option:checked").innerText(), "ARM_UI_TEST");
+  const systemRegisterSha256 = createHash("sha256").update(systemRegisterYaml).digest("hex");
+  const systemTranslationYaml = `translation_schema_version: 1
+format: "register-reference-translation"
+source_locale: "en"
+locale: "zh-CN"
+source_file: "architecture/arm/a-profile/arm-ui-test.yaml"
+source_sha256: "${systemRegisterSha256}"
+metadata:
+  status: "draft"
+  coverage: "partial"
+  method: "human"
+  translator: "browser test"
+  updated: "2026-08-17"
+translations:
+  sensor: "ARM 界面测试"
+  family: "A 系列"
+  pages:
+    - name: "Control"
+      title: "控制寄存器"
+      access: "MRS / MSR 访问"
+      desc: "合成系统寄存器分类"
+      registers:
+        - name: "TEST_EL1"
+          desc: "合成系统寄存器"
+          condition: "实现 FEAT_TEST 时可用"
+          fields:
+            - name: "SPLIT"
+              bits: "127:124,3:0"
+              desc: "非连续位域"
+              values:
+                - value: "0b1010xxxx"
+                  desc: "高半字节为 A"
+`;
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "arm-ui-test.zh-CN.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(systemTranslationYaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent.includes("ARM 界面测试"));
+  assert.equal(await page.locator("#languageControl").getAttribute("data-translation-available"), "true");
+  assert.match(await page.locator("#languageSwitcher").getAttribute("title"), /已加载译文 草稿 · 部分/);
+  assert.equal(await page.locator("[data-language-mode='bilingual']").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator("#chipSelect option:checked").innerText(), "ARM 界面测试 / ARM_UI_TEST");
+  assert.equal(await page.locator("#pageSelect option:checked").innerText(), "控制寄存器 / Control");
+  assert.match(await page.locator("#statusBand").innerText(), /译文 草稿 · 部分/);
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "arm-ui-test.stale.zh-CN.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(systemTranslationYaml.replace(systemRegisterSha256, "0".repeat(64))),
+  });
+  await page.locator("#importResultDialog").waitFor({ state: "visible" });
+  assert.match(await page.locator("#importResultDetails").innerText(), /source_sha256.*匹配/);
+  await page.locator("#importResultConfirmButton").click();
+  assert.equal(await page.locator("#chipSelect option:checked").innerText(), "ARM 界面测试 / ARM_UI_TEST");
+  await page.locator("#searchInput").fill("合成系统寄存器");
+  assert.equal(await page.locator(".system-overview-register").count(), 1);
+  await page.locator("#searchInput").fill("");
   assert.equal(await page.locator("#matrixViewButton").isHidden(), false);
   assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-label"), "全局预览");
   assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "true");
@@ -390,15 +479,154 @@ pages:
   assert.equal(await page.locator("#registerLocatorHeader").innerText(), "系统编码");
   assert.equal(await page.locator("#registerTableBody tr").count(), 1);
   assert.equal(await page.locator("#registerTableBody .system-encoding").innerText(), "S3_0_C1_C0_3");
+  assert.match(await page.locator("#registerTableBody .desc-cell").innerText(), /合成系统寄存器[\s\S]*Synthetic system register/);
+  await page.locator("[data-language-mode='zh']").click();
+  assert.match(await page.locator("#registerTableBody .desc-cell").innerText(), /合成系统寄存器/);
+  assert.doesNotMatch(await page.locator("#registerTableBody .desc-cell").innerText(), /Synthetic system register/);
+  await page.locator("#searchInput").fill("Synthetic system register");
+  assert.equal(await page.locator("#registerTableBody tr").count(), 1, "search should match English while Chinese display mode is active");
+  await page.locator("#searchInput").fill("");
+  await page.locator("[data-language-mode='en']").click();
+  assert.match(await page.locator("#registerTableBody .desc-cell").innerText(), /Synthetic system register/);
+  assert.doesNotMatch(await page.locator("#registerTableBody .desc-cell").innerText(), /合成系统寄存器/);
+  await page.locator("[data-language-mode='bilingual']").click();
   assert.deepEqual(await page.locator("#registerTableBody .system-accessors .badge").allTextContents(), ["READ", "WRITE"]);
   await page.locator("#registerTableBody .register-value-input").fill("0xA0000000000000000000000000000005");
   const splitField = page.locator("#registerTableBody .field-row").filter({ hasText: "SPLIT" });
   assert.match(await splitField.locator(".field-value").innerText(), /0xA5 \/ 165/);
   assert.match(await splitField.locator(".enum-chip.active").innerText(), /0b1010xxxx/);
+  assert.match(await splitField.locator(".enum-chip.active").innerText(), /高半字节为 A[\s\S]*High nibble is A/);
+  assert.match(await splitField.locator(".field-desc").innerText(), /非连续位域[\s\S]*Non-contiguous field/);
+  const flagField = page.locator("#registerTableBody .field-row").filter({ hasText: "Negative condition flag" });
+  assert.match(await flagField.locator(".field-meaning").innerText(), /Negative condition flag[\s\S]*Set to 1 if the result of the last flag-setting instruction was negative/);
+  assert.doesNotMatch(await flagField.locator(".field-meaning").innerText(), /已置位|未置位/);
+  assert.equal(await page.locator("#registerTableBody .field-meaning").filter({ hasText: "未匹配枚举" }).count(), 0);
+  await page.locator("#registerTableBody .register-value-input").fill("0xA0000000000000000000000000000105");
+  assert.match(await flagField.locator(".field-meaning").innerText(), /Negative condition flag/);
+  await page.locator("#registerTableBody .register-value-input").fill("0xB0000000000000000000000000000105");
+  assert.match(await splitField.locator(".field-meaning").innerText(), /资料未定义当前值/);
   assert.equal(await page.locator("#registerTableBody .field-condition").count(), 2);
   await page.locator("#searchInput").fill("FEAT_TEST");
   assert.equal(await page.locator("#registerTableBody tr").count(), 1);
   await page.locator("#searchInput").fill("");
+
+  const riscvRegisterYaml = `schema_version: 2
+sensor: "RISCV_RV64_UI_TEST"
+vendor: "RISC-V International"
+family: "RISC-V Privileged ISA"
+device_type: "architecture_registers"
+register_space:
+  kind: "riscv_system"
+  architecture: "RV64"
+  profile: "privileged"
+source:
+  title: "Synthetic RISC-V browser fixture"
+  version: "test"
+  revision: "test"
+  document: "test"
+  url: "https://example.invalid"
+  license: "test only"
+pages:
+  Supervisor:
+    access: "CSR instruction encoding space"
+    desc: "Synthetic supervisor CSRs"
+    registers:
+      - name: "satp"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Supervisor address translation and protection"
+        execution_state: "RV64"
+        condition: "S"
+        groups:
+          - "Supervisor"
+          - "S"
+        encoding:
+          scheme: "riscv_csr"
+          address: 0x180
+        accessors:
+          - name: "satp"
+            kind: "read"
+            instruction: "CSRRS rd, satp, x0"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x180
+  Machine:
+    access: "CSR instruction encoding space"
+    desc: "Synthetic machine CSRs"
+    registers:
+      - name: "mstatus"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Machine status register"
+        execution_state: "RV64"
+        condition: "Sm"
+        groups:
+          - "Machine"
+          - "Sm"
+        encoding:
+          scheme: "riscv_csr"
+          address: 0x300
+        accessors:
+          - name: "mstatus"
+            kind: "read"
+            instruction: "CSRRS rd, mstatus, x0"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x300
+          - name: "mstatus"
+            kind: "write"
+            instruction: "CSRRW x0, mstatus, rs1"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x300
+        fields:
+          - name: "MIE"
+            bits: "3"
+            access: "RW"
+            reset: 0
+            desc: "Machine interrupt enable"
+`;
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "riscv-rv64-ui-test.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(riscvRegisterYaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent.includes("RISCV_RV64_UI_TEST"));
+  await page.locator("#matrixViewButton").click();
+  await page.waitForFunction(() => document.querySelector("#matrixViewButton")?.getAttribute("aria-selected") === "true");
+  assert.equal(await page.locator("#matrixViewButton").getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator(".system-overview-group").count(), 2);
+  assert.equal(await page.locator(".system-overview-register").count(), 2);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.locator("#searchInput").fill("0x300");
+  assert.equal(await page.locator(".system-overview-register").count(), 1);
+  assert.match(await page.locator(".system-overview-register").innerText(), /mstatus/);
+  await page.locator("#searchInput").fill("Sm");
+  assert.equal(await page.locator(".system-overview-register").count(), 1);
+  assert.match(await page.locator(".system-overview-register").innerText(), /mstatus/);
+  await page.locator("#searchInput").fill("");
+  await page.locator(".system-overview-register").filter({ hasText: "mstatus" }).click();
+  await page.waitForFunction(() => document.querySelector("#tableViewButton")?.getAttribute("aria-selected") === "true");
+  assert.equal(await page.locator("#registerLocatorHeader").innerText(), "系统编码");
+  assert.equal(await page.locator("#registerTableBody .system-encoding").innerText(), "CSR 0x300");
+  assert.deepEqual(await page.locator("#registerTableBody .system-accessors .badge").allTextContents(), ["READ", "WRITE"]);
+  assert.equal(await page.locator("#pageSelect").inputValue(), "Machine");
+  await page.locator("#searchInput").fill("CSRRS");
+  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp", "mstatus"]);
+  assert.match(await page.locator("#tableSummary").innerText(), /跨 2 个分类搜索/);
+  assert.deepEqual(await page.locator("#registerTableBody .register-page-link span").allTextContents(), ["Supervisor", "Machine"]);
+  await page.locator("#searchInput").fill("satp");
+  assert.equal(await page.locator("#pageSelect").inputValue(), "Machine", "global search should not require changing the active page");
+  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp"]);
+  assert.match(await page.locator("#tableSummary").innerText(), /跨 1 个分类搜索/);
+  assert.equal(await page.locator("#registerTableBody .register-page-link").innerText(), "Supervisor");
+  await page.locator("#registerTableBody .register-page-link").click();
+  await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Supervisor");
+  assert.equal(await page.locator("#searchInput").inputValue(), "");
+  assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["satp"]);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
 
   const aarch32RegisterYaml = `schema_version: 2
 sensor: "ARM_A32_UI_TEST"
@@ -636,6 +864,25 @@ ${mProfileBulkRegisters}
   );
 
   await page.selectOption("#chipSelect", { label: "RK3588_DWC3" });
+  await page.locator("#tableViewButton").click();
+  await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG0");
+  const dataEndianField = page.locator("#registerTableBody .field-row").filter({ hasText: "datbigend" });
+  assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Little-endian \(default\)/);
+  assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b0/);
+  await page.locator("#registerTableBody .register-value-input").fill("0x00000801");
+  assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Big-endian/);
+  assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b1/);
+  await page.locator("#registerTableBody .register-value-input").fill("0x00000001");
+  await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG1");
+  const pipelineLimitField = page.locator("#registerTableBody .field-row").filter({ hasText: "pipe_trans_limit" });
+  assert.match(await pipelineLimitField.locator(".field-meaning").innerText(), /4 requests/);
+  assert.match(await pipelineLimitField.locator(".enum-chip.active").innerText(), /4'h3/);
+  await page.locator("#searchInput").fill("USB3OTG_DGCMD");
+  await page.getByRole("textbox", { name: "USB3OTG_DGCMD 的寄存器值" }).fill("0x00000008");
+  const commandTypeField = page.locator("#registerTableBody .field-row").filter({ hasText: "cmdtyp" });
+  assert.match(await commandTypeField.locator(".field-meaning").innerText(), /Start New Configuration/);
+  assert.match(await commandTypeField.locator(".enum-chip.active").innerText(), /8'h8/);
+  await page.locator("#searchInput").fill("");
   await page.locator("#matrixViewButton").click();
   assert.equal(await page.locator("#matrixViewButton").isVisible(), true);
   assert.equal(await page.locator("#registerLocatorHeader").innerText(), "地址");
@@ -808,6 +1055,11 @@ pages:
   });
   mobilePage.on("pageerror", (error) => mobileErrors.push(error.message));
   await mobilePage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  await mobilePage.locator("#toolsMenuButton").click();
+  const mobileToolsMenu = await mobilePage.locator("#toolsMenu").boundingBox();
+  assert.ok(mobileToolsMenu.x >= 0 && mobileToolsMenu.x + mobileToolsMenu.width <= 390, "mobile tools menu should stay inside the viewport");
+  assert.equal(await mobilePage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await mobilePage.keyboard.press("Escape");
   await mobilePage.locator("#radixToolButton").click();
   await mobilePage.waitForSelector("#radixDialog:not([hidden])");
   assert.equal(await mobilePage.locator("[data-radix-resize]").first().isVisible(), false);
@@ -853,6 +1105,151 @@ pages:
   assert.deepEqual(mobileErrors, []);
   await mobilePage.close();
   console.log(`[${browserEngine}] mobile floating tool checks passed`);
+
+  const libraryPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const libraryErrors = [];
+  libraryPage.on("console", (message) => {
+    if (message.type() === "error") libraryErrors.push(message.text());
+  });
+  libraryPage.on("pageerror", (error) => libraryErrors.push(error.message));
+  await libraryPage.addInitScript(
+    ({ yaml }) => {
+      let records = [
+        {
+          id: "builtin:test64",
+          sensor: "BUILTIN64",
+          vendor: "Example",
+          family: "Built-in",
+          deviceType: "test",
+          category: "内置",
+          enabled: true,
+          builtin: true,
+          sourceKind: "builtin",
+          sourceName: "builtin.yaml",
+          sourcePath: null,
+          yamlText: yaml,
+          notes: [],
+          attachments: [],
+          translations: [],
+        },
+        {
+          id: "mock:imported",
+          sensor: "IMPORTED64",
+          vendor: "Example",
+          family: "Imported",
+          deviceType: "test",
+          category: "待整理",
+          enabled: true,
+          builtin: false,
+          sourceKind: "imported",
+          sourceName: "imported.yaml",
+          sourcePath: null,
+          yamlText: yaml,
+          notes: [{ id: 1, content: "local note" }],
+          attachments: [{ id: 1, fileName: "manual.pdf" }],
+          translations: [],
+        },
+        {
+          id: "mock:linked",
+          sensor: "LINKED64",
+          vendor: "Example",
+          family: "Linked",
+          deviceType: "test",
+          category: "待整理",
+          enabled: true,
+          builtin: false,
+          sourceKind: "linked",
+          sourceName: "linked.yaml",
+          sourcePath: "/library/linked.yaml",
+          yamlText: yaml,
+          notes: [],
+          attachments: [],
+          translations: [],
+        },
+      ];
+      window.__libraryCommands = [];
+      window.__TAURI__ = {
+        core: {
+          invoke: async (command, args = {}) => {
+            window.__libraryCommands.push({ command, args });
+            if (command === "list_chips") return structuredClone(records);
+            if (command === "set_chip_enabled") {
+              records.find((record) => record.id === args.chipId).enabled = args.enabled;
+              return null;
+            }
+            if (command === "set_chip_category") {
+              records.find((record) => record.id === args.chipId).category = args.category;
+              return null;
+            }
+            if (command === "delete_chip") {
+              records = records.filter((record) => record.id !== args.chipId || record.builtin);
+              return null;
+            }
+            throw new Error(`unexpected command: ${command}`);
+          },
+        },
+      };
+    },
+    { yaml: yaml64 },
+  );
+  await libraryPage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  await libraryPage.waitForFunction(() => document.querySelectorAll("#chipSelect option").length === 3);
+  assert.equal(await libraryPage.locator("#libraryQuickButton").isVisible(), true);
+  await libraryPage.locator("#libraryQuickButton").click();
+  await libraryPage.waitForSelector("#libraryBackdrop:not([hidden])");
+  assert.equal(await libraryPage.locator(".library-row").count(), 3);
+  assert.equal(await libraryPage.locator(".library-protected").count(), 1);
+
+  await libraryPage.locator('.library-row[data-chip-id="mock:imported"] [data-library-action="select"]').check();
+  await libraryPage.locator('.library-row[data-chip-id="mock:linked"] [data-library-action="select"]').check();
+  assert.equal(await libraryPage.locator("#librarySelectionSummary").innerText(), "已选择 2 个");
+  assert.equal(await libraryPage.locator("#librarySelectAll").evaluate((input) => input.indeterminate), true);
+
+  await libraryPage.locator("#libraryHideSelectedButton").click();
+  await libraryPage.waitForFunction(() => document.querySelectorAll(".library-row.is-disabled").length === 2);
+  await libraryPage.locator("#libraryBatchCategory").fill("惯性传感器");
+  await libraryPage.locator("#libraryBatchCategoryButton").click();
+  await libraryPage.waitForFunction(() => Array.from(document.querySelectorAll('.library-row[data-chip-id^="mock:"] .category-input')).every((input) => input.value === "惯性传感器"));
+
+  await libraryPage.locator("#librarySelectAll").check();
+  assert.equal(await libraryPage.locator("#librarySelectionSummary").innerText(), "已选择 3 个");
+  await libraryPage.locator("#libraryRemoveSelectedButton").click();
+  await libraryPage.waitForSelector("#libraryRemoveDialog[open]");
+  assert.match(await libraryPage.locator("#libraryRemoveSummary").innerText(), /2 个芯片/);
+  assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /1 条本地备注/);
+  assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /1 个附件关联/);
+  assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /再次关联该目录时可能重新出现/);
+  await libraryPage.locator("#libraryRemoveCancelButton").click();
+  await libraryPage.waitForSelector("#libraryRemoveDialog", { state: "hidden" });
+  assert.equal(await libraryPage.locator(".library-row").count(), 3);
+
+  await libraryPage.locator("#libraryRemoveSelectedButton").click();
+  await libraryPage.locator("#libraryRemoveConfirmButton").click();
+  await libraryPage.waitForFunction(() => document.querySelectorAll(".library-row").length === 1);
+  assert.equal(await libraryPage.locator(".library-row .library-chip-name strong").innerText(), "BUILTIN64");
+  assert.equal(await libraryPage.locator("#libraryRemoveSelectedButton").isDisabled(), true);
+  assert.match(await libraryPage.locator("#libraryStatus").innerText(), /移除 2 个芯片/);
+  assert.deepEqual(
+    await libraryPage.evaluate(() => window.__libraryCommands.filter((item) => item.command === "delete_chip").map((item) => item.args.chipId)),
+    ["mock:imported", "mock:linked"],
+  );
+
+  await libraryPage.setViewportSize({ width: 390, height: 844 });
+  assert.equal(
+    await libraryPage.evaluate(() => {
+      const panel = document.querySelector("#libraryPanel").getBoundingClientRect();
+      const footer = document.querySelector(".library-footer").getBoundingClientRect();
+      return document.documentElement.scrollWidth <= window.innerWidth
+        && panel.top >= 0
+        && panel.bottom <= window.innerHeight
+        && footer.bottom <= window.innerHeight;
+    }),
+    true,
+    "mobile chip library and its actions should stay inside the viewport",
+  );
+  assert.deepEqual(libraryErrors, []);
+  await libraryPage.close();
+  console.log(`[${browserEngine}] chip library management checks passed`);
 
   const notesPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const noteErrors = [];
@@ -1019,6 +1416,8 @@ pages:
   );
   await attachmentsPage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   await attachmentsPage.waitForFunction(() => document.querySelector("#attachmentsButtonCount")?.textContent === "2");
+  assert.equal(await attachmentsPage.locator("#toolsMenuBadge").innerText(), "2");
+  await attachmentsPage.locator("#toolsMenuButton").click();
   await attachmentsPage.locator("#attachmentsButton").click();
   await attachmentsPage.waitForSelector("#attachmentsDialog[open]");
   assert.equal(await attachmentsPage.locator(".attachment-row").count(), 2);
@@ -1031,7 +1430,8 @@ pages:
   );
   await attachmentsPage.locator("#addAttachmentsButton").click();
   await attachmentsPage.waitForFunction(() => document.querySelectorAll(".attachment-row").length === 3);
-  assert.equal(await attachmentsPage.locator("#attachmentsButtonCount").innerText(), "3");
+  assert.equal(await attachmentsPage.locator("#attachmentsButtonCount").textContent(), "3");
+  assert.equal(await attachmentsPage.locator("#toolsMenuBadge").innerText(), "3");
   attachmentsPage.once("dialog", (dialog) => dialog.accept());
   await attachmentsPage.locator('.attachment-row[data-attachment-id="3"] [data-attachment-action="delete"]').click();
   await attachmentsPage.waitForFunction(() => document.querySelectorAll(".attachment-row").length === 2);
@@ -1040,7 +1440,7 @@ pages:
   await attachmentsPage.close();
   console.log(`[${browserEngine}] attachment checks passed`);
 
-  console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, register notes, and chip attachments`);
+  console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, chip library, register notes, and chip attachments`);
 } finally {
   let closeTimer;
   const closeTimedOut = await Promise.race([
