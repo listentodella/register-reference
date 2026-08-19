@@ -176,25 +176,6 @@ fn valid_locale(value: &str) -> bool {
     index == parts.len()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::valid_locale;
-
-    #[test]
-    fn accepts_supported_canonical_language_tags() {
-        for locale in ["en", "zh-CN", "zh-Hans", "zh-Hans-CN", "es-419"] {
-            assert!(valid_locale(locale), "expected {locale} to be valid");
-        }
-    }
-
-    #[test]
-    fn rejects_malformed_or_reordered_language_tags() {
-        for locale in ["", "EN", "zh-cn", "zh-CN-Hans", "zh-CN-US", "english"] {
-            assert!(!valid_locale(locale), "expected {locale} to be invalid");
-        }
-    }
-}
-
 fn valid_date(value: &str) -> bool {
     let parts = value
         .split('-')
@@ -763,4 +744,23 @@ pub(crate) fn validate_translation_yaml(
         translator: translator_name,
         updated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_locale;
+
+    #[test]
+    fn accepts_supported_canonical_language_tags() {
+        for locale in ["en", "zh-CN", "zh-Hans", "zh-Hans-CN", "es-419"] {
+            assert!(valid_locale(locale), "expected {locale} to be valid");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_or_reordered_language_tags() {
+        for locale in ["", "EN", "zh-cn", "zh-CN-Hans", "zh-CN-US", "english"] {
+            assert!(!valid_locale(locale), "expected {locale} to be invalid");
+        }
+    }
 }

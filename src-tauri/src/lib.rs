@@ -11,6 +11,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
 mod core_service;
+#[cfg(feature = "mcp")]
+pub mod mcp_server;
+#[cfg(feature = "mcp")]
+mod read_service;
 mod search;
 mod translation;
 mod validation;

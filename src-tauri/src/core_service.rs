@@ -82,6 +82,7 @@ pub(crate) struct DecodedField {
     pub value_hex: String,
     pub value_dec: String,
     pub enum_description: String,
+    pub enum_status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -112,6 +113,20 @@ pub(crate) struct RegisterDetails {
     pub aliases: Vec<String>,
     pub accessors: Vec<AccessorDetails>,
     pub fields: Vec<FieldDetails>,
+}
+
+#[cfg(any(feature = "mcp", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegisterStructureComparison {
+    pub equal: bool,
+    pub changed_properties: Vec<String>,
+    pub added_fields: Vec<String>,
+    pub removed_fields: Vec<String>,
+    pub modified_fields: Vec<String>,
+    pub added_enums: Vec<String>,
+    pub removed_enums: Vec<String>,
+    pub modified_enums: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -506,6 +521,122 @@ pub(crate) fn compare_registers(before: Option<&Value>, after: &Value) -> Regist
     result
 }
 
+#[cfg(any(feature = "mcp", test))]
+fn detail_field_map(register: &RegisterDetails) -> BTreeMap<String, String> {
+    register
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let name = if field.name.is_empty() {
+                format!("#{index}")
+            } else {
+                field.name.clone()
+            };
+            (
+                format!("{name}/{}", field.bits),
+                serde_json::to_string(field).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "mcp", test))]
+fn detail_enum_map(register: &RegisterDetails) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::new();
+    for (field_index, field) in register.fields.iter().enumerate() {
+        let field_name = if field.name.is_empty() {
+            format!("#{field_index}")
+        } else {
+            field.name.clone()
+        };
+        for (enum_index, item) in field.enums.iter().enumerate() {
+            let identity = if item.value.is_empty() && item.name.is_empty() {
+                format!("#{enum_index}")
+            } else {
+                format!("{}@{}", item.value, item.name)
+            };
+            result.insert(
+                format!("{field_name}/{}/{identity}", field.bits),
+                serde_json::to_string(item).unwrap_or_default(),
+            );
+        }
+    }
+    result
+}
+
+#[cfg(any(feature = "mcp", test))]
+pub(crate) fn compare_register_details(
+    left: &RegisterDetails,
+    right: &RegisterDetails,
+) -> RegisterStructureComparison {
+    let mut result = RegisterStructureComparison::default();
+    let properties = [
+        ("name", left.name == right.name),
+        ("locator", left.locator == right.locator),
+        ("access", left.access == right.access),
+        ("bitWidth", left.bit_width == right.bit_width),
+        ("reset", left.reset == right.reset),
+        ("description", left.description == right.description),
+        ("condition", left.condition == right.condition),
+        (
+            "executionState",
+            left.execution_state == right.execution_state,
+        ),
+        ("aliasNote", left.alias_note == right.alias_note),
+        ("noDumpReason", left.no_dump_reason == right.no_dump_reason),
+        ("aliases", left.aliases == right.aliases),
+        (
+            "accessors",
+            serde_json::to_string(&left.accessors).ok()
+                == serde_json::to_string(&right.accessors).ok(),
+        ),
+    ];
+    result.changed_properties.extend(
+        properties
+            .into_iter()
+            .filter_map(|(name, equal)| (!equal).then_some(name.to_owned())),
+    );
+
+    let left_fields = detail_field_map(left);
+    let right_fields = detail_field_map(right);
+    for key in right_fields.keys() {
+        if !left_fields.contains_key(key) {
+            result.added_fields.push(key.clone());
+        } else if left_fields[key] != right_fields[key] {
+            result.modified_fields.push(key.clone());
+        }
+    }
+    for key in left_fields.keys() {
+        if !right_fields.contains_key(key) {
+            result.removed_fields.push(key.clone());
+        }
+    }
+
+    let left_enums = detail_enum_map(left);
+    let right_enums = detail_enum_map(right);
+    for key in right_enums.keys() {
+        if !left_enums.contains_key(key) {
+            result.added_enums.push(key.clone());
+        } else if left_enums[key] != right_enums[key] {
+            result.modified_enums.push(key.clone());
+        }
+    }
+    for key in left_enums.keys() {
+        if !right_enums.contains_key(key) {
+            result.removed_enums.push(key.clone());
+        }
+    }
+    result.equal = result.changed_properties.is_empty()
+        && result.added_fields.is_empty()
+        && result.removed_fields.is_empty()
+        && result.modified_fields.is_empty()
+        && result.added_enums.is_empty()
+        && result.removed_enums.is_empty()
+        && result.modified_enums.is_empty();
+    result
+}
+
 pub(crate) fn decode_register_value(
     value: u128,
     bit_width: u16,
@@ -527,10 +658,11 @@ pub(crate) fn decode_register_value(
                 let mask = width_mask(width);
                 (result << width.min(127)) | ((value >> low) & mask)
             });
-            let enum_description = field
+            let matched_enum = field
                 .enums
                 .iter()
-                .find(|item| parse_numeric(&item.value) == Some(field_value))
+                .find(|item| parse_numeric(&item.value) == Some(field_value));
+            let enum_description = matched_enum
                 .map(|item| {
                     if item.description.is_empty() {
                         item.name.clone()
@@ -545,6 +677,14 @@ pub(crate) fn decode_register_value(
                 value_hex: format!("0x{field_value:X}"),
                 value_dec: field_value.to_string(),
                 enum_description,
+                enum_status: if field.enums.is_empty() {
+                    "not_defined"
+                } else if matched_enum.is_some() {
+                    "matched"
+                } else {
+                    "unknown_value"
+                }
+                .to_owned(),
             }
         })
         .collect();
@@ -613,7 +753,9 @@ mod tests {
         assert_eq!(decoded.fields[0].value_hex, "0x2");
         assert_eq!(decoded.fields[0].value_dec, "2");
         assert_eq!(decoded.fields[0].enum_description, "active mode");
+        assert_eq!(decoded.fields[0].enum_status, "matched");
         assert_eq!(decoded.fields[1].value_dec, "1");
+        assert_eq!(decoded.fields[1].enum_status, "not_defined");
         assert_eq!(
             get_field(&register, "MODE", Some("3:2")).unwrap().access,
             ""
@@ -675,5 +817,25 @@ mod tests {
         assert_eq!(diff.modified_registers, vec!["P/R@0x1"]);
         assert!(diff.added_registers.is_empty());
         assert!(diff.removed_registers.is_empty());
+    }
+
+    #[test]
+    fn compares_two_register_structures() {
+        let left_document: Value = serde_yaml::from_str(
+            "pages:\n  P:\n    registers:\n      - name: LEFT\n        access: RO\n        bit_width: 8\n        fields:\n          - name: MODE\n            bits: '1:0'\n            values:\n              - { value: 0, desc: idle }\n",
+        )
+        .unwrap();
+        let right_document: Value = serde_yaml::from_str(
+            "pages:\n  P:\n    registers:\n      - name: RIGHT\n        access: RW\n        bit_width: 8\n        fields:\n          - name: MODE\n            bits: '1:0'\n            values:\n              - { value: 0, desc: active }\n          - name: ENABLE\n            bits: '2'\n",
+        )
+        .unwrap();
+        let left = get_register(&left_document, "P", 0).unwrap();
+        let right = get_register(&right_document, "P", 0).unwrap();
+        let comparison = compare_register_details(&left, &right);
+        assert!(!comparison.equal);
+        assert_eq!(comparison.changed_properties, vec!["name", "access"]);
+        assert_eq!(comparison.added_fields, vec!["ENABLE/2"]);
+        assert_eq!(comparison.modified_fields, vec!["MODE/1:0"]);
+        assert_eq!(comparison.modified_enums, vec!["MODE/1:0/0@"]);
     }
 }
