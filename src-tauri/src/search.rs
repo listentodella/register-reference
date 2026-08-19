@@ -2,9 +2,9 @@ use rusqlite::{params, params_from_iter, Connection};
 use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
-use strsim::{jaro_winkler, normalized_damerau_levenshtein};
+use strsim::normalized_damerau_levenshtein;
 
-pub(crate) const SEARCH_SCHEMA_VERSION: &str = "1";
+pub(crate) const SEARCH_SCHEMA_VERSION: &str = "2";
 
 #[derive(Clone, Debug)]
 pub(crate) struct SearchChipContext {
@@ -36,13 +36,14 @@ struct SearchDocument {
     register_locator: String,
     field_name: String,
     field_bits: String,
+    access: String,
     title: String,
     aliases: String,
     source_text: String,
     translated_text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchResult {
     pub kind: String,
@@ -59,7 +60,42 @@ pub(crate) struct SearchResult {
     pub title: String,
     pub snippet: String,
     pub match_language: String,
-    pub score: f64,
+    pub result_type: String,
+    pub match_kind: String,
+    pub match_terms: Vec<String>,
+    pub section: String,
+    #[serde(skip)]
+    relevance_tier: u8,
+    #[serde(skip)]
+    match_quality: f64,
+    #[serde(skip)]
+    current_chip: bool,
+    #[serde(skip)]
+    recent_chip_rank: usize,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchFilter {
+    pub key: String,
+    pub value: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchIssue {
+    pub token: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub filters: Vec<SearchFilter>,
+    pub issues: Vec<SearchIssue>,
+    pub suggestion: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,11 +236,18 @@ fn register_locator(register: &Mapping) -> String {
     .replace('\n', ", ")
 }
 
-fn enum_items(values: Option<&Value>) -> Vec<(String, String, String)> {
+fn enum_items(values: Option<&Value>) -> Vec<(String, String, String, String)> {
     match values {
         Some(Value::Mapping(items)) => items
             .iter()
-            .map(|(value, desc)| (value_text(value), value_text(desc), String::new()))
+            .map(|(value, desc)| {
+                (
+                    value_text(value),
+                    String::new(),
+                    value_text(desc),
+                    String::new(),
+                )
+            })
             .collect(),
         Some(Value::Sequence(items)) => items
             .iter()
@@ -212,10 +255,8 @@ fn enum_items(values: Option<&Value>) -> Vec<(String, String, String)> {
             .map(|item| {
                 (
                     scalar_text(get(item, "value")),
-                    join_text([
-                        scalar_text(get(item, "name")),
-                        scalar_text(get(item, "desc")),
-                    ]),
+                    scalar_text(get(item, "name")),
+                    scalar_text(get(item, "desc")),
                     scalar_text(get(item, "condition")),
                 )
             })
@@ -229,11 +270,11 @@ fn translated_enum_description(fields: &[&Mapping], enum_value: &str, condition:
         fields
             .iter()
             .flat_map(|field| enum_items(get(field, "values")))
-            .filter_map(|(value, desc, translated_condition)| {
+            .filter_map(|(value, name, desc, translated_condition)| {
                 if value == enum_value
                     && (translated_condition.is_empty() || translated_condition == condition)
                 {
-                    Some(join_text([desc, translated_condition]))
+                    Some(join_text([name, desc, translated_condition]))
                 } else {
                     None
                 }
@@ -259,13 +300,7 @@ fn extract_documents(
             .iter()
             .map(|root| map_text(root, &["sensor", "vendor", "family", "description"])),
     );
-    let chip_source = join_text([
-        chip.sensor.clone(),
-        chip.vendor.clone(),
-        chip.family.clone(),
-        chip.category.clone(),
-        map_text(root, &["description", "device_type"]),
-    ]);
+    let chip_source = map_text(root, &["description", "device_type"]);
     let mut documents = vec![SearchDocument {
         doc_key: format!("{}:chip", chip.id),
         kind: "chip".to_owned(),
@@ -275,6 +310,7 @@ fn extract_documents(
         register_locator: String::new(),
         field_name: String::new(),
         field_bits: String::new(),
+        access: String::new(),
         title: chip.sensor.clone(),
         aliases: join_text([
             chip.vendor.clone(),
@@ -308,6 +344,7 @@ fn extract_documents(
             register_locator: String::new(),
             field_name: String::new(),
             field_bits: String::new(),
+            access: scalar_text(get(page, "access")),
             title: page_name.clone(),
             aliases: map_text(page, &["title"]),
             source_text: page_source.clone(),
@@ -320,6 +357,7 @@ fn extract_documents(
                 continue;
             };
             let register_name = scalar_text(get(register, "name"));
+            let register_access = scalar_text(get(register, "access"));
             let locator = register_locator(register);
             let register_translations = translated_register(&page_translations, &register_name);
             let mut aliases = string_list(register, "aliases");
@@ -335,23 +373,16 @@ fn extract_documents(
                     scalar_text(get(accessor, "condition")),
                 ]);
             }
-            let register_source = join_text([
-                map_text(
-                    register,
-                    &[
-                        "name",
-                        "access",
-                        "reset",
-                        "desc",
-                        "condition",
-                        "execution_state",
-                        "alias_note",
-                        "no_dump_reason",
-                    ],
-                ),
-                locator.clone(),
-                aliases.join(" "),
-            ]);
+            let register_source = map_text(
+                register,
+                &[
+                    "desc",
+                    "condition",
+                    "execution_state",
+                    "alias_note",
+                    "no_dump_reason",
+                ],
+            );
             let register_translated = join_text(register_translations.iter().map(|register| {
                 map_text(
                     register,
@@ -369,8 +400,9 @@ fn extract_documents(
                 register_locator: locator.clone(),
                 field_name: String::new(),
                 field_bits: String::new(),
+                access: register_access.clone(),
                 title: register_name.clone(),
-                aliases: aliases.join(" "),
+                aliases: join_text(aliases),
                 source_text: register_source,
                 translated_text: register_translated,
             });
@@ -381,21 +413,18 @@ fn extract_documents(
                 };
                 let field_name = scalar_text(get(field, "name"));
                 let field_bits = scalar_text(get(field, "bits"));
+                let field_access = {
+                    let value = scalar_text(get(field, "access"));
+                    if value.is_empty() {
+                        register_access.clone()
+                    } else {
+                        value
+                    }
+                };
                 let field_translations =
                     translated_field(&register_translations, &field_name, &field_bits);
-                let field_source = map_text(
-                    field,
-                    &[
-                        "name",
-                        "bits",
-                        "access",
-                        "reset",
-                        "reset_info",
-                        "condition",
-                        "reserved",
-                        "desc",
-                    ],
-                );
+                let field_source =
+                    map_text(field, &["reset_info", "condition", "reserved", "desc"]);
                 let field_translated = join_text(
                     field_translations
                         .iter()
@@ -411,13 +440,14 @@ fn extract_documents(
                     register_locator: locator.clone(),
                     field_name: field_name.clone(),
                     field_bits: field_bits.clone(),
+                    access: field_access.clone(),
                     title: field_name.clone(),
                     aliases: field_bits.clone(),
                     source_text: field_source,
                     translated_text: field_translated,
                 });
 
-                for (enum_index, (enum_value, enum_desc, condition)) in
+                for (enum_index, (enum_value, enum_name, enum_desc, condition)) in
                     enum_items(get(field, "values")).into_iter().enumerate()
                 {
                     let translated_desc =
@@ -431,9 +461,14 @@ fn extract_documents(
                         register_locator: locator.clone(),
                         field_name: field_name.clone(),
                         field_bits: field_bits.clone(),
-                        title: enum_value.clone(),
-                        aliases: field_name.clone(),
-                        source_text: join_text([enum_value, enum_desc, condition]),
+                        access: field_access.clone(),
+                        title: if enum_name.is_empty() {
+                            enum_value.clone()
+                        } else {
+                            enum_name.clone()
+                        },
+                        aliases: join_text([enum_value, enum_name, field_name.clone()]),
+                        source_text: join_text([enum_desc, condition]),
                         translated_text: translated_desc,
                     });
                 }
@@ -451,6 +486,7 @@ fn extract_documents(
             register_locator: note.register_key.clone(),
             field_name: String::new(),
             field_bits: String::new(),
+            access: String::new(),
             title: note.register_name.clone(),
             aliases: note.kind.clone(),
             source_text: note.content.clone(),
@@ -461,6 +497,21 @@ fn extract_documents(
 }
 
 pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), String> {
+    let has_access_column = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('search_documents') WHERE name = 'access')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if !has_access_column {
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS search_fts;
+                 DROP TABLE IF EXISTS search_documents;",
+            )
+            .map_err(|error| format!("无法升级搜索索引：{error}"))?;
+    }
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS app_metadata (
@@ -481,6 +532,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), String> {
                 register_locator TEXT NOT NULL,
                 field_name TEXT NOT NULL,
                 field_bits TEXT NOT NULL,
+                access TEXT NOT NULL,
                 title TEXT NOT NULL,
                 aliases TEXT NOT NULL,
                 source_text TEXT NOT NULL,
@@ -577,8 +629,8 @@ pub(crate) fn replace_chip_documents(
             "INSERT INTO search_documents (
                 doc_key, chip_id, chip_name, category, enabled, kind, page_name,
                 register_index, register_name, register_locator, field_name, field_bits,
-                title, aliases, source_text, translated_text
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                access, title, aliases, source_text, translated_text
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         )
         .map_err(|error| format!("无法准备搜索索引：{error}"))?;
     for document in documents {
@@ -596,6 +648,7 @@ pub(crate) fn replace_chip_documents(
                 document.register_locator,
                 document.field_name,
                 document.field_bits,
+                document.access,
                 document.title,
                 document.aliases,
                 document.source_text,
@@ -624,8 +677,8 @@ pub(crate) fn replace_note_documents(
             "INSERT INTO search_documents (
                 doc_key, chip_id, chip_name, category, enabled, kind, page_name,
                 register_index, register_name, register_locator, field_name, field_bits,
-                title, aliases, source_text, translated_text
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, '', '', ?10, ?11, ?12, '')",
+                access, title, aliases, source_text, translated_text
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, '', '', '', ?10, ?11, ?12, '')",
         )
         .map_err(|error| format!("无法准备备注索引：{error}"))?;
     for document in documents
@@ -681,8 +734,382 @@ fn normalize(value: &str) -> String {
     value
         .chars()
         .flat_map(char::to_lowercase)
-        .filter(|character| !matches!(character, '_' | '-' | ' ' | '\t' | '\r' | '\n'))
+        .filter(|character| character.is_alphanumeric())
         .collect()
+}
+
+#[derive(Default)]
+struct ParsedSearchQuery {
+    text: String,
+    words: Vec<String>,
+    filters: Vec<SearchFilter>,
+    issues: Vec<SearchIssue>,
+}
+
+#[derive(Debug)]
+struct SearchRow {
+    kind: String,
+    chip_id: String,
+    chip_name: String,
+    category: String,
+    enabled: bool,
+    page_name: String,
+    register_index: Option<i64>,
+    register_name: String,
+    register_locator: String,
+    field_name: String,
+    field_bits: String,
+    access: String,
+    title: String,
+    aliases: String,
+    source_text: String,
+    translated_text: String,
+}
+
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in query.chars() {
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                current.push(character);
+            }
+        } else if character.is_whitespace() && quote.is_none() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn canonical_type(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "register" | "reg" | "寄存器" => Some("register"),
+        "field" | "bitfield" | "位域" => Some("field"),
+        "enum" | "value" | "枚举" => Some("enum"),
+        "description" | "desc" | "text" | "说明" => Some("description"),
+        "note" | "备注" => Some("note"),
+        "chip" | "芯片" => Some("chip"),
+        "page" | "category" | "分类" => Some("page"),
+        _ => None,
+    }
+}
+
+fn canonical_access(value: &str) -> String {
+    let normalized = normalize(value);
+    match normalized.as_str() {
+        "read" | "readonly" | "ro" => "ro".to_owned(),
+        "write" | "writeonly" | "wo" => "wo".to_owned(),
+        "readwrite" | "rw" => "rw".to_owned(),
+        "writeonce" | "w1" => "w1".to_owned(),
+        _ => normalized,
+    }
+}
+
+fn canonical_address(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if digits.is_empty()
+        || !digits
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        || !digits.chars().any(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    u128::from_str_radix(digits, 16)
+        .ok()
+        .map(|address| format!("0x{address:X}"))
+}
+
+fn canonical_bits(value: &str) -> Option<String> {
+    let mut trimmed = value.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        trimmed = &trimmed[1..trimmed.len() - 1];
+    }
+    let values = trimmed.split(':').collect::<Vec<_>>();
+    match values.as_slice() {
+        [bit] => bit.trim().parse::<u16>().ok().map(|bit| bit.to_string()),
+        [high, low] => {
+            let high = high.trim().parse::<u16>().ok()?;
+            let low = low.trim().parse::<u16>().ok()?;
+            (high >= low).then(|| {
+                if high == low {
+                    high.to_string()
+                } else {
+                    format!("{high}:{low}")
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_search_query(query: &str) -> ParsedSearchQuery {
+    let mut parsed = ParsedSearchQuery::default();
+    let mut text_tokens = Vec::new();
+    for token in query_tokens(query) {
+        let Some((raw_key, raw_value)) = token.split_once(':') else {
+            text_tokens.push(token);
+            continue;
+        };
+        let key = raw_key.to_ascii_lowercase();
+        let looks_like_filter = raw_key
+            .chars()
+            .all(|character| character.is_ascii_alphabetic());
+        if !looks_like_filter {
+            text_tokens.push(token);
+            continue;
+        }
+        if !matches!(key.as_str(), "chip" | "type" | "access" | "addr" | "bits") {
+            parsed.issues.push(SearchIssue {
+                token: token.clone(),
+                message: format!("不支持筛选项 {raw_key}:，可用 chip/type/access/addr/bits"),
+            });
+            continue;
+        }
+        if raw_value.trim().is_empty() {
+            parsed.issues.push(SearchIssue {
+                token: token.clone(),
+                message: format!("筛选项 {raw_key}: 缺少值"),
+            });
+            continue;
+        }
+        let canonical = match key.as_str() {
+            "type" => canonical_type(raw_value).map(str::to_owned).ok_or_else(|| {
+                "type: 支持 register、field、enum、description、note、chip、page".to_owned()
+            }),
+            "addr" => canonical_address(raw_value)
+                .ok_or_else(|| "addr: 需要十六进制地址，例如 addr:0xE000ED00".to_owned()),
+            "bits" => canonical_bits(raw_value)
+                .ok_or_else(|| "bits: 需要位号或高位:低位，例如 bits:31:28".to_owned()),
+            "access" => {
+                let value = canonical_access(raw_value);
+                (!value.is_empty())
+                    .then_some(value)
+                    .ok_or_else(|| "access: 缺少访问属性".to_owned())
+            }
+            _ => Ok(raw_value.trim().to_owned()),
+        };
+        match canonical {
+            Ok(value) => parsed.filters.push(SearchFilter { key, value, token }),
+            Err(message) => parsed.issues.push(SearchIssue { token, message }),
+        }
+    }
+    parsed.text = text_tokens.join(" ").trim().to_owned();
+    parsed.words = parsed
+        .text
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if parsed.words.is_empty() && !parsed.text.is_empty() {
+        parsed.words.push(parsed.text.to_lowercase());
+    }
+    parsed
+}
+
+fn filter_values<'a>(parsed: &'a ParsedSearchQuery, key: &'a str) -> impl Iterator<Item = &'a str> {
+    parsed
+        .filters
+        .iter()
+        .filter(move |filter| filter.key == key)
+        .map(|filter| filter.value.as_str())
+}
+
+fn alias_values(aliases: &str) -> impl Iterator<Item = &str> {
+    aliases
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn canonical_locator_encoding(value: &str) -> Option<String> {
+    let compact = value.trim().to_ascii_lowercase().replace(' ', "");
+    let display = compact.split('_').collect::<Vec<_>>();
+    if display.len() == 5
+        && display[0].starts_with('s')
+        && display[2].starts_with('c')
+        && display[3].starts_with('c')
+    {
+        return Some(format!(
+            "aarch64:{}:{}:{}:{}:{}",
+            display[0].trim_start_matches('s'),
+            display[1],
+            display[2].trim_start_matches('c'),
+            display[3].trim_start_matches('c'),
+            display[4]
+        ));
+    }
+    let pairs = compact
+        .split(',')
+        .filter_map(|part| part.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .collect::<HashMap<_, _>>();
+    match pairs.get("scheme").copied() {
+        Some("aarch64_sysreg") => Some(format!(
+            "aarch64:{}:{}:{}:{}:{}",
+            pairs.get("op0")?,
+            pairs.get("op1")?,
+            pairs.get("crn")?,
+            pairs.get("crm")?,
+            pairs.get("op2")?
+        )),
+        Some("aarch32_cp15") | Some("aarch32_coproc") => Some(format!(
+            "aarch32:{}:{}:{}:{}:{}",
+            pairs.get("coproc")?,
+            pairs.get("opc1").or_else(|| pairs.get("op1"))?,
+            pairs.get("crn")?,
+            pairs.get("crm")?,
+            pairs.get("opc2").or_else(|| pairs.get("op2"))?
+        )),
+        _ => None,
+    }
+}
+
+fn locator_address(locator: &str) -> Option<String> {
+    let trimmed = locator.trim();
+    if trimmed.to_ascii_lowercase().starts_with("0x") {
+        canonical_address(trimmed)
+    } else {
+        None
+    }
+}
+
+fn field_bits_match(field_bits: &str, expected: &str) -> bool {
+    field_bits
+        .split(',')
+        .filter_map(canonical_bits)
+        .any(|bits| bits == expected)
+}
+
+fn abbreviation(word: &str) -> &str {
+    match word {
+        "address" => "addr",
+        "error" => "err",
+        "configuration" => "cfg",
+        "control" => "ctrl",
+        "status" => "sts",
+        "interrupt" => "int",
+        "enable" => "en",
+        "disable" => "dis",
+        "transmit" => "tx",
+        "receive" => "rx",
+        "buffer" => "buf",
+        "valid" => "vld",
+        _ => word,
+    }
+}
+
+fn identifier_variants(parsed: &ParsedSearchQuery) -> Vec<String> {
+    let normalized = normalize(&parsed.text);
+    let abbreviated = parsed
+        .words
+        .iter()
+        .map(|word| abbreviation(word))
+        .collect::<String>();
+    let mut variants = vec![normalized];
+    if !abbreviated.is_empty() && abbreviated != variants[0] {
+        variants.push(abbreviated);
+    }
+    variants
+}
+
+fn identifier_match(value: &str, variants: &[String]) -> Option<f64> {
+    let normalized = normalize(value);
+    variants.iter().find_map(|variant| {
+        if variant.is_empty() {
+            None
+        } else if normalized.starts_with(variant) {
+            Some(1.0)
+        } else if normalized.contains(variant) {
+            Some(0.9)
+        } else {
+            None
+        }
+    })
+}
+
+fn text_match_terms(source: &str, parsed: &ParsedSearchQuery) -> Vec<String> {
+    let lowercase = source.to_lowercase();
+    let phrase = parsed.text.to_lowercase();
+    if !phrase.is_empty() && lowercase.contains(&phrase) {
+        return vec![parsed.text.clone()];
+    }
+    if !parsed.words.is_empty()
+        && parsed
+            .words
+            .iter()
+            .all(|word| lowercase.contains(&word.to_lowercase()))
+    {
+        return parsed.words.clone();
+    }
+    Vec::new()
+}
+
+fn access_matches(access: &str, expected: &str) -> bool {
+    canonical_access(access) == expected
+        || access
+            .split(|character: char| character.is_whitespace() || matches!(character, ',' | ';'))
+            .any(|part| canonical_access(part) == expected)
+}
+
+fn row_matches_filters(row: &SearchRow, parsed: &ParsedSearchQuery) -> bool {
+    let type_filters = filter_values(parsed, "type").collect::<Vec<_>>();
+    if !type_filters.is_empty()
+        && !type_filters.iter().all(|expected| {
+            if *expected == "description" {
+                !row.source_text.is_empty() || !row.translated_text.is_empty()
+            } else {
+                row.kind == *expected
+            }
+        })
+    {
+        return false;
+    }
+    if !filter_values(parsed, "chip").all(|expected| {
+        let expected = normalize(expected);
+        normalize(&row.chip_name).contains(&expected) || normalize(&row.chip_id).contains(&expected)
+    }) {
+        return false;
+    }
+    if !filter_values(parsed, "access").all(|expected| access_matches(&row.access, expected)) {
+        return false;
+    }
+    if !filter_values(parsed, "addr")
+        .all(|expected| locator_address(&row.register_locator).as_deref() == Some(expected))
+    {
+        return false;
+    }
+    if !filter_values(parsed, "bits").all(|expected| field_bits_match(&row.field_bits, expected)) {
+        return false;
+    }
+    let has_explicit_type = !type_filters.is_empty();
+    if !has_explicit_type
+        && filter_values(parsed, "addr").next().is_some()
+        && row.kind != "register"
+    {
+        return false;
+    }
+    if !has_explicit_type && filter_values(parsed, "bits").next().is_some() && row.kind != "field" {
+        return false;
+    }
+    true
 }
 
 fn fts_query(query: &str) -> String {
@@ -740,23 +1167,358 @@ fn snippet(source: &str, query: &str) -> String {
     )
 }
 
+fn make_result(
+    row: SearchRow,
+    parsed: &ParsedSearchQuery,
+    current_chip_id: Option<&str>,
+    recent_chip_ids: &[String],
+) -> Option<SearchResult> {
+    if !row_matches_filters(&row, parsed) {
+        return None;
+    }
+    let normalized_query = normalize(&parsed.text);
+    let normalized_title = normalize(&row.title);
+    let variants = identifier_variants(parsed);
+    let aliases = alias_values(&row.aliases).collect::<Vec<_>>();
+    let exact_alias = aliases
+        .iter()
+        .find(|alias| normalize(alias) == normalized_query)
+        .copied();
+    let address_intent = canonical_address(&parsed.text).filter(|_| {
+        parsed.text.trim().to_ascii_lowercase().starts_with("0x")
+            || (parsed.text.trim().len() >= 3
+                && parsed
+                    .text
+                    .chars()
+                    .any(|character| character.is_ascii_digit()))
+    });
+    let bits_intent = canonical_bits(&parsed.text).filter(|_| {
+        parsed.text.contains(':')
+            || (parsed.text.starts_with('[') && parsed.text.ends_with(']'))
+            || parsed.text.parse::<u16>().is_ok()
+    });
+    let system_encoding_intent = canonical_locator_encoding(&parsed.text);
+    let translated_terms = text_match_terms(&row.translated_text, parsed);
+    let source_terms = text_match_terms(&row.source_text, parsed);
+    let fuzzy = if normalized_query.is_empty() || normalized_title.is_empty() {
+        0.0
+    } else {
+        normalized_damerau_levenshtein(&normalized_query, &normalized_title)
+    };
+
+    let type_filter = filter_values(parsed, "type").next();
+    let filter_only = parsed.text.is_empty();
+    let (relevance_tier, match_quality, match_kind, match_language, match_terms, matched_source) =
+        if filter_only {
+            if let Some(address) = filter_values(parsed, "addr").next() {
+                (
+                    0,
+                    1.0,
+                    "address",
+                    "identifier",
+                    vec![address.to_owned()],
+                    row.register_locator.as_str(),
+                )
+            } else if let Some(bits) = filter_values(parsed, "bits").next() {
+                (
+                    1,
+                    1.0,
+                    "bits",
+                    "identifier",
+                    vec![bits.to_owned()],
+                    row.field_bits.as_str(),
+                )
+            } else if type_filter == Some("description") {
+                if !row.translated_text.is_empty() {
+                    (
+                        4,
+                        1.0,
+                        "translated_description",
+                        "zh-CN",
+                        Vec::new(),
+                        row.translated_text.as_str(),
+                    )
+                } else {
+                    (
+                        4,
+                        1.0,
+                        "source_description",
+                        "source",
+                        Vec::new(),
+                        row.source_text.as_str(),
+                    )
+                }
+            } else if row.kind == "note" {
+                (5, 1.0, "note", "note", Vec::new(), row.source_text.as_str())
+            } else {
+                let tier = if row.kind == "enum" { 3 } else { 2 };
+                (tier, 1.0, "filter", "identifier", Vec::new(), "")
+            }
+        } else if row.kind == "register"
+            && address_intent.as_deref() == locator_address(&row.register_locator).as_deref()
+            && address_intent.is_some()
+        {
+            (
+                0,
+                1.0,
+                "address",
+                "identifier",
+                vec![parsed.text.clone()],
+                row.register_locator.as_str(),
+            )
+        } else if row.kind == "register"
+            && system_encoding_intent.is_some()
+            && system_encoding_intent == canonical_locator_encoding(&row.register_locator)
+        {
+            (
+                0,
+                1.0,
+                "system_encoding",
+                "identifier",
+                vec![parsed.text.clone()],
+                row.register_locator.as_str(),
+            )
+        } else if row.kind == "register" && normalized_title == normalized_query {
+            (
+                0,
+                1.0,
+                "register_name",
+                "identifier",
+                vec![parsed.text.clone()],
+                "",
+            )
+        } else if row.kind == "register" && exact_alias.is_some() {
+            (
+                0,
+                1.0,
+                "alias",
+                "identifier",
+                vec![parsed.text.clone()],
+                exact_alias.unwrap_or_default(),
+            )
+        } else if row.kind == "field" && normalized_title == normalized_query {
+            (
+                1,
+                1.0,
+                "field_name",
+                "identifier",
+                vec![parsed.text.clone()],
+                "",
+            )
+        } else if row.kind == "field"
+            && bits_intent
+                .as_deref()
+                .is_some_and(|bits| field_bits_match(&row.field_bits, bits))
+        {
+            (
+                1,
+                1.0,
+                "bits",
+                "identifier",
+                vec![parsed.text.clone()],
+                row.field_bits.as_str(),
+            )
+        } else if row.kind == "enum" && normalized_title == normalized_query {
+            (
+                3,
+                1.0,
+                "enum_name",
+                "identifier",
+                vec![parsed.text.clone()],
+                "",
+            )
+        } else if row.kind == "enum" && exact_alias.is_some() {
+            (
+                3,
+                1.0,
+                "enum_value",
+                "identifier",
+                vec![parsed.text.clone()],
+                exact_alias.unwrap_or_default(),
+            )
+        } else if matches!(row.kind.as_str(), "register" | "field" | "chip" | "page")
+            && identifier_match(&row.title, &variants).is_some()
+        {
+            (
+                2,
+                identifier_match(&row.title, &variants).unwrap_or_default(),
+                "name",
+                "identifier",
+                parsed.words.clone(),
+                "",
+            )
+        } else if row.kind == "register"
+            && aliases
+                .iter()
+                .filter_map(|alias| identifier_match(alias, &variants))
+                .next()
+                .is_some()
+        {
+            let matching = aliases
+                .iter()
+                .find(|alias| identifier_match(alias, &variants).is_some())
+                .copied()
+                .unwrap_or_default();
+            (
+                2,
+                0.85,
+                "alias",
+                "identifier",
+                parsed.words.clone(),
+                matching,
+            )
+        } else if row.kind == "enum" && identifier_match(&row.title, &variants).is_some() {
+            (3, 0.9, "enum_name", "identifier", parsed.words.clone(), "")
+        } else if !translated_terms.is_empty() && row.kind != "note" {
+            (
+                4,
+                1.0,
+                "translated_description",
+                "zh-CN",
+                translated_terms,
+                row.translated_text.as_str(),
+            )
+        } else if !source_terms.is_empty() && row.kind != "note" {
+            (
+                4,
+                1.0,
+                "source_description",
+                "source",
+                source_terms,
+                row.source_text.as_str(),
+            )
+        } else if row.kind == "note" && !source_terms.is_empty() {
+            (
+                5,
+                1.0,
+                "note",
+                "note",
+                source_terms,
+                row.source_text.as_str(),
+            )
+        } else if matches!(row.kind.as_str(), "register" | "field") && fuzzy >= 0.72 {
+            (6, fuzzy, "fuzzy_name", "identifier", Vec::new(), "")
+        } else {
+            return None;
+        };
+
+    if type_filter == Some("description") && relevance_tier != 4 {
+        return None;
+    }
+    let result_type = match relevance_tier {
+        4 => "description",
+        _ => row.kind.as_str(),
+    }
+    .to_owned();
+    let section = match relevance_tier {
+        0..=3 => "entities",
+        4..=5 => "text",
+        _ => "suggestions",
+    };
+    let recent_chip_rank = recent_chip_ids
+        .iter()
+        .position(|chip_id| chip_id == &row.chip_id)
+        .unwrap_or(usize::MAX);
+    let snippet_text = if matched_source.is_empty() {
+        String::new()
+    } else {
+        snippet(
+            matched_source,
+            match_terms.first().map(String::as_str).unwrap_or(""),
+        )
+    };
+    Some(SearchResult {
+        kind: row.kind,
+        chip_id: row.chip_id.clone(),
+        chip_name: row.chip_name,
+        category: row.category,
+        enabled: row.enabled,
+        page_name: row.page_name,
+        register_index: row.register_index.map(|value| value as usize),
+        register_name: row.register_name,
+        register_locator: row.register_locator,
+        field_name: row.field_name,
+        field_bits: row.field_bits,
+        title: row.title,
+        snippet: snippet_text,
+        match_language: match_language.to_owned(),
+        result_type,
+        match_kind: match_kind.to_owned(),
+        match_terms,
+        section: section.to_owned(),
+        relevance_tier,
+        match_quality,
+        current_chip: current_chip_id == Some(row.chip_id.as_str()),
+        recent_chip_rank,
+    })
+}
+
+fn extend_candidates(
+    connection: &Connection,
+    candidates: &mut HashMap<i64, f64>,
+    sql: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("无法准备意图搜索：{error}"))?;
+    for id in statement
+        .query_map([value], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("无法执行意图搜索：{error}"))?
+        .flatten()
+    {
+        candidates.entry(id).or_insert(0.0);
+    }
+    Ok(())
+}
+
 pub(crate) fn search(
     connection: &Connection,
     query: &str,
     current_chip_id: Option<&str>,
     limit: usize,
-) -> Result<Vec<SearchResult>, String> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Ok(Vec::new());
+    recent_chip_ids: &[String],
+) -> Result<SearchResponse, String> {
+    let parsed = parse_search_query(query.trim());
+    if !parsed.issues.is_empty() {
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            filters: parsed.filters,
+            issues: parsed.issues,
+            suggestion: String::new(),
+        });
     }
-    let normalized_query = normalize(query);
+    if parsed.text.is_empty() && parsed.filters.is_empty() {
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            filters: Vec::new(),
+            issues: Vec::new(),
+            suggestion: String::new(),
+        });
+    }
     let mut candidates: HashMap<i64, f64> = HashMap::new();
-    let like = format!(
-        "%{}%",
-        query.to_lowercase().replace('%', "\\%").replace('_', "\\_")
-    );
-    {
+    let trimmed = parsed.text.trim();
+    let address_intent = canonical_address(trimmed).filter(|_| {
+        trimmed.to_ascii_lowercase().starts_with("0x")
+            || (trimmed.len() >= 3 && trimmed.chars().any(|character| character.is_ascii_digit()))
+    });
+    let bits_intent = canonical_bits(trimmed).filter(|_| {
+        trimmed.contains(':')
+            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            || trimmed.parse::<u16>().is_ok()
+    });
+    let encoding_intent = canonical_locator_encoding(trimmed);
+    let has_structured_intent =
+        address_intent.is_some() || bits_intent.is_some() || encoding_intent.is_some();
+    if !parsed.text.is_empty() && !has_structured_intent {
+        let like = format!(
+            "%{}%",
+            parsed
+                .text
+                .to_lowercase()
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let mut statement = connection
             .prepare(
                 "SELECT id FROM search_documents
@@ -771,51 +1533,179 @@ pub(crate) fn search(
         for id in rows.flatten() {
             candidates.insert(id, 0.0);
         }
-    }
-    if query.chars().count() >= 3 {
-        let expression = fts_query(&query.to_lowercase());
-        let mut statement = connection
-            .prepare(
-                "SELECT rowid, bm25(search_fts, 8.0, 5.0, 1.5, 2.0)
-                 FROM search_fts WHERE search_fts MATCH ?1 ORDER BY rank LIMIT 600",
-            )
-            .map_err(|error| format!("无法准备全文搜索：{error}"))?;
-        let rows = statement
-            .query_map([expression], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
-            })
-            .map_err(|error| format!("无法执行全文搜索：{error}"))?;
-        for (id, rank) in rows.flatten() {
-            candidates
-                .entry(id)
-                .and_modify(|value| *value = value.min(rank))
-                .or_insert(rank);
+        if parsed.text.chars().count() >= 3 {
+            let identifier_query = !parsed.text.chars().any(char::is_whitespace)
+                && parsed
+                    .text
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || matches!(character, '_' | '-'));
+            let expression = if candidates.is_empty() && identifier_query {
+                fts_query(&parsed.text.to_lowercase())
+            } else {
+                format!("\"{}\"", parsed.text.to_lowercase().replace('"', "\"\""))
+            };
+            let candidate_limit = if candidates.is_empty() && identifier_query {
+                400
+            } else {
+                300
+            };
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT rowid, bm25(search_fts, 8.0, 5.0, 1.5, 2.0)
+                     FROM search_fts WHERE search_fts MATCH ?1 ORDER BY rank LIMIT {candidate_limit}"
+                ))
+                .map_err(|error| format!("无法准备全文搜索：{error}"))?;
+            let rows = statement
+                .query_map([expression], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+                })
+                .map_err(|error| format!("无法执行全文搜索：{error}"))?;
+            for (id, rank) in rows.flatten() {
+                candidates
+                    .entry(id)
+                    .and_modify(|value| *value = value.min(rank))
+                    .or_insert(rank);
+            }
+        } else {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM search_documents
+                     WHERE lower(source_text) LIKE ?1 ESCAPE '\\' OR lower(translated_text) LIKE ?1 ESCAPE '\\'
+                     LIMIT 250",
+                )
+                .map_err(|error| format!("无法准备短语搜索：{error}"))?;
+            for id in statement
+                .query_map([&like], |row| row.get::<_, i64>(0))
+                .map_err(|error| format!("无法执行短语搜索：{error}"))?
+                .flatten()
+            {
+                candidates.entry(id).or_insert(0.0);
+            }
         }
-    } else {
-        let mut statement = connection
-            .prepare(
-                "SELECT id FROM search_documents
-                 WHERE lower(source_text) LIKE ?1 ESCAPE '\\' OR lower(translated_text) LIKE ?1 ESCAPE '\\'
-                 LIMIT 250",
+    } else if parsed.text.is_empty() {
+        let (sql, value) = if let Some(value) = filter_values(&parsed, "addr").next() {
+            ("SELECT id FROM search_documents WHERE upper(register_locator) = upper(?1) LIMIT 1200", value.to_owned())
+        } else if let Some(value) = filter_values(&parsed, "bits").next() {
+            (
+                "SELECT id FROM search_documents WHERE field_bits LIKE ?1 LIMIT 1200",
+                format!("%{value}%"),
             )
-            .map_err(|error| format!("无法准备短语搜索：{error}"))?;
-        for id in statement
-            .query_map([&like], |row| row.get::<_, i64>(0))
-            .map_err(|error| format!("无法执行短语搜索：{error}"))?
-            .flatten()
+        } else if let Some(value) = filter_values(&parsed, "chip").next() {
+            (
+                "SELECT id FROM search_documents WHERE lower(chip_name) LIKE lower(?1) LIMIT 1200",
+                format!("%{value}%"),
+            )
+        } else if let Some(value) = filter_values(&parsed, "type").next() {
+            if value == "description" {
+                ("SELECT id FROM search_documents WHERE source_text <> '' OR translated_text <> '' LIMIT 1200", String::new())
+            } else {
+                (
+                    "SELECT id FROM search_documents WHERE kind = ?1 LIMIT 1200",
+                    value.to_owned(),
+                )
+            }
+        } else if let Some(value) = filter_values(&parsed, "access").next() {
+            ("SELECT id FROM search_documents WHERE lower(replace(replace(access, '/', ''), '-', '')) LIKE lower(?1) LIMIT 1200", format!("%{value}%"))
+        } else {
+            ("SELECT id FROM search_documents LIMIT 1200", String::new())
+        };
+        let mut statement = connection
+            .prepare(sql)
+            .map_err(|error| format!("无法准备筛选搜索：{error}"))?;
+        let mut rows = if sql.contains("?1") {
+            statement.query([value])
+        } else {
+            statement.query([])
+        }
+        .map_err(|error| format!("无法执行筛选搜索：{error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("无法读取筛选结果：{error}"))?
         {
-            candidates.entry(id).or_insert(0.0);
+            candidates.insert(
+                row.get::<_, i64>(0)
+                    .map_err(|error| format!("无法读取筛选结果：{error}"))?,
+                0.0,
+            );
+        }
+    }
+    if !parsed.text.is_empty() {
+        if let Some(address) = address_intent {
+            extend_candidates(
+                connection,
+                &mut candidates,
+                "SELECT id FROM search_documents WHERE upper(register_locator) = upper(?1) LIMIT 400",
+                &address,
+            )?;
+        }
+        if let Some(bits) = bits_intent {
+            extend_candidates(
+                connection,
+                &mut candidates,
+                "SELECT id FROM search_documents WHERE field_bits LIKE ?1 LIMIT 400",
+                &format!("%{bits}%"),
+            )?;
+        }
+        if let Some(encoding) = encoding_intent {
+            let parts = encoding.split(':').collect::<Vec<_>>();
+            let pattern = match parts.as_slice() {
+                ["aarch64", op0, op1, crn, crm, op2] => {
+                    format!("%op0={op0}%op1={op1}%crn={crn}%crm={crm}%op2={op2}%")
+                }
+                ["aarch32", coproc, opc1, crn, crm, opc2] => {
+                    format!("%coproc={coproc}%opc1={opc1}%crn={crn}%crm={crm}%opc2={opc2}%")
+                }
+                _ => String::new(),
+            };
+            if !pattern.is_empty() {
+                extend_candidates(
+                    connection,
+                    &mut candidates,
+                    "SELECT id FROM search_documents WHERE lower(register_locator) LIKE lower(?1) LIMIT 400",
+                    &pattern,
+                )?;
+            }
         }
     }
     if candidates.is_empty() {
-        return Ok(Vec::new());
+        let mut suggestion = (0.0, String::new());
+        if !parsed.text.is_empty() {
+            let mut statement = connection
+                .prepare(
+                    "SELECT title FROM search_documents
+                     WHERE kind IN ('register', 'field')
+                     ORDER BY length(title), title LIMIT 2000",
+                )
+                .map_err(|error| format!("无法准备相近名称建议：{error}"))?;
+            for title in statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("无法执行相近名称建议：{error}"))?
+                .flatten()
+            {
+                let quality =
+                    normalized_damerau_levenshtein(&normalize(&parsed.text), &normalize(&title));
+                if quality > suggestion.0 {
+                    suggestion = (quality, title);
+                }
+            }
+        }
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            filters: parsed.filters,
+            issues: Vec::new(),
+            suggestion: if suggestion.0 >= 0.62 {
+                suggestion.1
+            } else {
+                String::new()
+            },
+        });
     }
 
     let mut results = Vec::new();
     let placeholders = vec!["?"; candidates.len()].join(",");
     let query_sql = format!(
-        "SELECT id, kind, chip_id, chip_name, category, enabled, page_name, register_index,
-                register_name, register_locator, field_name, field_bits, title, aliases,
+        "SELECT kind, chip_id, chip_name, category, enabled, page_name, register_index,
+                register_name, register_locator, field_name, field_bits, access, title, aliases,
                 source_text, translated_text
          FROM search_documents WHERE id IN ({placeholders})"
     );
@@ -824,123 +1714,367 @@ pub(crate) fn search(
         .map_err(|error| format!("无法读取搜索候选：{error}"))?;
     let rows = statement
         .query_map(params_from_iter(candidates.keys()), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)? != 0,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, String>(11)?,
-                row.get::<_, String>(12)?,
-                row.get::<_, String>(13)?,
-                row.get::<_, String>(14)?,
-                row.get::<_, String>(15)?,
-            ))
+            Ok(SearchRow {
+                kind: row.get(0)?,
+                chip_id: row.get(1)?,
+                chip_name: row.get(2)?,
+                category: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                page_name: row.get(5)?,
+                register_index: row.get(6)?,
+                register_name: row.get(7)?,
+                register_locator: row.get(8)?,
+                field_name: row.get(9)?,
+                field_bits: row.get(10)?,
+                access: row.get(11)?,
+                title: row.get(12)?,
+                aliases: row.get(13)?,
+                source_text: row.get(14)?,
+                translated_text: row.get(15)?,
+            })
         })
         .map_err(|error| format!("无法查询搜索候选：{error}"))?;
+    let mut suggestion = (0.0, String::new());
     for row in rows.flatten() {
-        let (
-            id,
-            kind,
-            chip_id,
-            chip_name,
-            category,
-            enabled,
-            page_name,
-            register_index,
-            register_name,
-            register_locator,
-            field_name,
-            field_bits,
-            title,
-            aliases,
-            source_text,
-            translated_text,
-        ) = row;
-        let Some(fts_rank) = candidates.get(&id) else {
-            continue;
-        };
-        let normalized_title = normalize(&title);
-        let normalized_aliases = normalize(&aliases);
-        let normalized_locator = normalize(&register_locator);
-        let exact_title = normalized_title == normalized_query;
-        let exact_locator = normalized_locator == normalized_query;
-        let prefix = normalized_title.starts_with(&normalized_query);
-        let contains = normalized_title.contains(&normalized_query)
-            || normalized_aliases.contains(&normalized_query);
-        let fuzzy = jaro_winkler(&normalized_query, &normalized_title).max(
-            normalized_damerau_levenshtein(&normalized_query, &normalized_title),
-        );
-        let source_match = source_text.to_lowercase().contains(&query.to_lowercase());
-        let translated_match = translated_text
-            .to_lowercase()
-            .contains(&query.to_lowercase());
-        let mut score = if exact_title || exact_locator {
-            1000.0
-        } else if prefix {
-            900.0
-        } else if contains {
-            820.0
-        } else if fuzzy >= 0.58 {
-            520.0 + fuzzy * 260.0
-        } else if translated_match {
-            570.0
-        } else if source_match {
-            550.0
+        if !matches!(row.kind.as_str(), "register" | "field") || parsed.text.is_empty() {
+            // Suggestions only use navigable entity names.
         } else {
-            420.0 - fts_rank.min(100.0)
-        };
-        if current_chip_id == Some(chip_id.as_str()) {
-            score += 35.0;
+            let quality =
+                normalized_damerau_levenshtein(&normalize(&parsed.text), &normalize(&row.title));
+            if quality > suggestion.0 {
+                suggestion = (quality, row.title.clone());
+            }
         }
-        score += match kind.as_str() {
-            "register" => 24.0,
-            "field" => 18.0,
-            "enum" => 10.0,
-            "note" => 4.0,
-            _ => 0.0,
-        };
-        let (matched_source, match_language) = if translated_match {
-            (&translated_text, "zh-CN")
-        } else if source_match {
-            (&source_text, "source")
-        } else if contains && !aliases.is_empty() {
-            (&aliases, "identifier")
-        } else {
-            (&source_text, "identifier")
-        };
-        results.push(SearchResult {
-            kind,
-            chip_id,
-            chip_name,
-            category,
-            enabled,
-            page_name,
-            register_index: register_index.map(|value| value as usize),
-            register_name,
-            register_locator,
-            field_name,
-            field_bits,
-            title,
-            snippet: snippet(matched_source, query),
-            match_language: match_language.to_owned(),
-            score,
-        });
+        if let Some(result) = make_result(row, &parsed, current_chip_id, recent_chip_ids) {
+            results.push(result);
+        }
     }
     results.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
+        left.relevance_tier
+            .cmp(&right.relevance_tier)
+            .then_with(|| right.match_quality.total_cmp(&left.match_quality))
+            .then_with(|| right.current_chip.cmp(&left.current_chip))
+            .then_with(|| left.recent_chip_rank.cmp(&right.recent_chip_rank))
             .then_with(|| left.chip_name.cmp(&right.chip_name))
             .then_with(|| left.page_name.cmp(&right.page_name))
             .then_with(|| left.register_name.cmp(&right.register_name))
     });
-    results.truncate(limit.clamp(1, 100));
-    Ok(results)
+    let limit = limit.clamp(1, 100);
+    let strong_count = results
+        .iter()
+        .filter(|result| result.section == "entities")
+        .count();
+    let text_cap = if strong_count > 0 { 30 } else { limit };
+    let mut text_count = 0;
+    results.retain(|result| {
+        if result.section == "text" {
+            text_count += 1;
+            text_count <= text_cap
+        } else {
+            true
+        }
+    });
+    results.truncate(limit);
+    let suggestion = if results.is_empty() && suggestion.0 >= 0.62 {
+        suggestion.1
+    } else {
+        String::new()
+    };
+    Ok(SearchResponse {
+        results,
+        filters: parsed.filters,
+        issues: Vec::new(),
+        suggestion,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDocument<'a> {
+        id: i64,
+        kind: &'a str,
+        chip_id: &'a str,
+        chip_name: &'a str,
+        page_name: &'a str,
+        register_name: &'a str,
+        register_locator: &'a str,
+        field_name: &'a str,
+        field_bits: &'a str,
+        access: &'a str,
+        title: &'a str,
+        aliases: &'a str,
+        source_text: &'a str,
+        translated_text: &'a str,
+    }
+
+    fn connection_with_documents(documents: &[TestDocument<'_>]) -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        initialize_schema(&connection).unwrap();
+        for document in documents {
+            connection
+                .execute(
+                    "INSERT INTO search_documents (
+                        id, doc_key, chip_id, chip_name, category, enabled, kind, page_name,
+                        register_index, register_name, register_locator, field_name, field_bits,
+                        access, title, aliases, source_text, translated_text
+                     ) VALUES (?1, ?2, ?3, ?4, '测试', 1, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    params![
+                        document.id,
+                        format!("test:{}", document.id),
+                        document.chip_id,
+                        document.chip_name,
+                        document.kind,
+                        document.page_name,
+                        document.register_name,
+                        document.register_locator,
+                        document.field_name,
+                        document.field_bits,
+                        document.access,
+                        document.title,
+                        document.aliases,
+                        document.source_text,
+                        document.translated_text,
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+    }
+
+    fn fixtures() -> Vec<TestDocument<'static>> {
+        vec![
+            TestDocument {
+                id: 1,
+                kind: "register",
+                chip_id: "chip:dwc3",
+                chip_name: "RK3588_DWC3",
+                page_name: "MMIO",
+                register_name: "USB3OTG_GBUSERRADDRLO",
+                register_locator: "0xC118",
+                field_name: "",
+                field_bits: "",
+                access: "RO",
+                title: "USB3OTG_GBUSERRADDRLO",
+                aliases: "GBUSERRADDRLO",
+                source_text: "Stores the lower bus error address.",
+                translated_text: "保存总线错误地址低位。",
+            },
+            TestDocument {
+                id: 2,
+                kind: "field",
+                chip_id: "chip:dwc3",
+                chip_name: "RK3588_DWC3",
+                page_name: "MMIO",
+                register_name: "USB3OTG_GSTS",
+                register_locator: "0xC110",
+                field_name: "buserraddrvld",
+                field_bits: "4:4",
+                access: "RO",
+                title: "buserraddrvld",
+                aliases: "4:4",
+                source_text: "Indicates that the bus error address is valid.",
+                translated_text: "指示总线错误地址有效。",
+            },
+            TestDocument {
+                id: 3,
+                kind: "field",
+                chip_id: "chip:current",
+                chip_name: "CURRENT_CHIP",
+                page_name: "Events",
+                register_name: "EVENT_FIFO",
+                register_locator: "0x20",
+                field_name: "event_addr",
+                field_bits: "31:28",
+                access: "RW",
+                title: "event_addr",
+                aliases: "31:28",
+                source_text: "The event FIFO can include a bus error address in diagnostic text.",
+                translated_text: "事件 FIFO 的诊断说明可能包含总线错误地址。",
+            },
+            TestDocument {
+                id: 4,
+                kind: "register",
+                chip_id: "chip:m3",
+                chip_name: "Arm Cortex-M3 system registers",
+                page_name: "Special Registers",
+                register_name: "APSR",
+                register_locator: "scheme=aarch64_sysreg, op0=3, op1=0, crn=1, crm=0, op2=3",
+                field_name: "",
+                field_bits: "",
+                access: "RW",
+                title: "APSR",
+                aliases: "Application Program Status Register",
+                source_text: "Application status flags.",
+                translated_text: "应用程序状态标志。",
+            },
+            TestDocument {
+                id: 5,
+                kind: "field",
+                chip_id: "chip:m3",
+                chip_name: "Arm Cortex-M3 system registers",
+                page_name: "Special Registers",
+                register_name: "APSR",
+                register_locator: "scheme=aarch64_sysreg, op0=3, op1=0, crn=1, crm=0, op2=3",
+                field_name: "overflow",
+                field_bits: "31:28",
+                access: "RW",
+                title: "overflow",
+                aliases: "31:28",
+                source_text: "Overflow condition flag.",
+                translated_text: "算术溢出条件标志。",
+            },
+            TestDocument {
+                id: 6,
+                kind: "field",
+                chip_id: "chip:m4",
+                chip_name: "Arm Cortex-M4 system registers",
+                page_name: "Special Registers",
+                register_name: "APSR",
+                register_locator: "selector=APSR",
+                field_name: "overflow",
+                field_bits: "31:28",
+                access: "RO",
+                title: "overflow",
+                aliases: "31:28",
+                source_text: "Overflow condition flag.",
+                translated_text: "算术溢出条件标志。",
+            },
+            TestDocument {
+                id: 7,
+                kind: "note",
+                chip_id: "chip:dwc3",
+                chip_name: "RK3588_DWC3",
+                page_name: "MMIO",
+                register_name: "USB3OTG_GBUSERRADDRLO",
+                register_locator: "note-key",
+                field_name: "",
+                field_bits: "",
+                access: "",
+                title: "USB3OTG_GBUSERRADDRLO",
+                aliases: "warning",
+                source_text: "调试时先清空错误状态。",
+                translated_text: "",
+            },
+        ]
+    }
+
+    #[test]
+    fn parses_composable_filters_and_reports_invalid_tokens() {
+        let parsed = parse_search_query("chip:m3 type:field access:rw overflow");
+        assert_eq!(parsed.text, "overflow");
+        assert_eq!(parsed.filters.len(), 3);
+        assert!(parsed.issues.is_empty());
+        assert_eq!(filter_values(&parsed, "type").next(), Some("field"));
+
+        let invalid = parse_search_query("type: addr:xyz scope:all");
+        assert_eq!(invalid.issues.len(), 3);
+        assert!(invalid
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("缺少值")));
+        assert!(invalid
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("不支持筛选项")));
+    }
+
+    #[test]
+    fn upgrades_the_derived_search_schema_without_preserving_stale_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE search_documents (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+                 INSERT INTO search_documents(id, title) VALUES (1, 'stale');",
+            )
+            .unwrap();
+        initialize_schema(&connection).unwrap();
+        let has_access = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('search_documents') WHERE name = 'access')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        let rows = connection
+            .query_row("SELECT COUNT(*) FROM search_documents", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap();
+        assert!(has_access);
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn ranks_entities_before_description_and_uses_context_only_as_a_tie_break() {
+        let connection = connection_with_documents(&fixtures());
+        let response = search(
+            &connection,
+            "bus error address",
+            Some("chip:current"),
+            100,
+            &["chip:current".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(response.results[0].section, "entities");
+        let first_text = response
+            .results
+            .iter()
+            .position(|result| result.section == "text")
+            .unwrap();
+        assert!(response.results[..first_text]
+            .iter()
+            .all(|result| result.section == "entities"));
+        assert!(response.results[..first_text]
+            .iter()
+            .any(|result| result.register_name == "USB3OTG_GBUSERRADDRLO"));
+        assert_eq!(response.results[first_text].result_type, "description");
+    }
+
+    #[test]
+    fn normalizes_address_bits_and_system_encoding_intents() {
+        let connection = connection_with_documents(&fixtures());
+        for query in ["0xC118", "C118", "addr:0xc118"] {
+            let response = search(&connection, query, None, 100, &[]).unwrap();
+            assert_eq!(response.results[0].register_name, "USB3OTG_GBUSERRADDRLO");
+            assert_eq!(response.results[0].match_kind, "address");
+        }
+        for query in ["[4]", "4"] {
+            let response = search(&connection, query, None, 100, &[]).unwrap();
+            assert_eq!(response.results[0].field_name, "buserraddrvld");
+            assert_eq!(response.results[0].match_kind, "bits");
+        }
+        let range = search(&connection, "bits:31:28", None, 100, &[]).unwrap();
+        assert!(range
+            .results
+            .iter()
+            .all(|result| result.field_bits == "31:28"));
+        let encoding = search(&connection, "S3_0_C1_C0_3", None, 100, &[]).unwrap();
+        assert_eq!(encoding.results[0].register_name, "APSR");
+        assert_eq!(encoding.results[0].match_kind, "system_encoding");
+    }
+
+    #[test]
+    fn applies_chip_type_and_access_filters_without_leaking_them_into_text() {
+        let connection = connection_with_documents(&fixtures());
+        let response = search(
+            &connection,
+            "chip:m3 type:field access:rw overflow",
+            None,
+            100,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(response.filters.len(), 3);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].chip_id, "chip:m3");
+        assert_eq!(response.results[0].field_name, "overflow");
+
+        let translated = search(&connection, "算术溢出", None, 100, &[]).unwrap();
+        assert_eq!(translated.results[0].match_kind, "translated_description");
+        let note = search(&connection, "清空错误状态", None, 100, &[]).unwrap();
+        assert_eq!(note.results[0].result_type, "note");
+        assert_eq!(note.results[0].match_kind, "note");
+    }
 }

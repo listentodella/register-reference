@@ -12,6 +12,7 @@
     "test:arm-import": "node tools/test-arm-mrs-importer.mjs && node tools/test-arm-cmsis-importer.mjs",
     "test:arm-cmsis-import": "node tools/test-arm-cmsis-importer.mjs",
     "test:riscv-import": "node tools/test-riscv-csr-importer.mjs",
+    "test:search": "node tools/test-search-worker.mjs",
     "test:web": "npm run web:build && node tools/test-viewer.mjs",
     "test:web:webkit": "npm run web:build && cross-env BROWSER_ENGINE=webkit node tools/test-viewer.mjs",
     "tauri": "tauri",

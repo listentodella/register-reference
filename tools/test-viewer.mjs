@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium, webkit } from "playwright";
@@ -11,6 +11,7 @@ const browserEngine = process.env.BROWSER_ENGINE || "chromium";
 const browserType = { chromium, webkit }[browserEngine];
 if (!browserType) throw new Error(`unsupported BROWSER_ENGINE: ${browserEngine}`);
 const launchOptions = browserEngine === "chromium" && existsSync(chromePath) ? { executablePath: chromePath } : {};
+const dwc3Yaml = readFileSync(resolve(root, "dwc3_rk3588.yaml"), "utf8");
 const suiteWatchdog = setTimeout(() => {
   console.error(`${browserEngine} viewer tests exceeded the 120 second suite timeout`);
   process.exit(1);
@@ -37,6 +38,17 @@ try {
   };
 
   await page.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  assert.equal(await page.locator("#chipSelect option").count(), 1, "the clean library should have only its empty placeholder");
+  assert.equal(await page.locator("#chipSelect").inputValue(), "");
+  assert.equal(await page.locator("#pageSelect option:checked").innerText(), "尚未选择页面");
+  assert.match(await page.locator("#statusBand").innerText(), /请选择 YAML 文件或目录/);
+  assert.match(await page.locator("#languageSwitcher").getAttribute("title"), /导入芯片后/);
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "dwc3_rk3588.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(dwc3Yaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "RK3588_DWC3");
   const toolbarLayout = await page.evaluate(() => ({
     pageWidth: document.documentElement.scrollWidth,
     languageWidth: document.getElementById("languageControl").getBoundingClientRect().width,
@@ -326,6 +338,12 @@ try {
   assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(28, 29, 31)");
   await page.reload({ waitUntil: "load" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "dwc3_rk3588.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(dwc3Yaml),
+  });
+  await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "RK3588_DWC3");
   await openThemePicker();
   await page.locator('[data-theme-option="contrast"]').click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "contrast");
@@ -363,7 +381,7 @@ pages:
         access: "RW"
         width: 16
         bit_width: 128
-        desc: "Synthetic system register"
+        desc: "Synthetic system register; Event FIFO diagnostic text includes a bus error address"
         condition: "when FEAT_TEST is implemented"
         encoding:
           scheme: "aarch64_sysreg"
@@ -641,10 +659,20 @@ pages:
   await page.goBack();
   await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Machine");
   assert.equal(await page.locator("#searchInput").inputValue(), "satp");
+  await page.waitForFunction(() => document.activeElement?.id === "searchInput");
+  assert.equal(await page.locator("#searchPanel").isVisible(), true, "back navigation should restore search focus and results");
   assert.deepEqual(await page.locator("#registerTableBody .name-cell strong").allTextContents(), ["mstatus"]);
   await page.goForward();
   await page.waitForFunction(() => document.querySelector("#pageSelect")?.value === "Supervisor");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.locator("#searchInput").fill("");
+  await page.locator("#searchInput").focus();
+  assert.equal(await page.locator(".search-result-group").first().innerText(), "最近跳转");
+  assert.ok(await page.locator(".search-result").filter({ hasText: "satp" }).count() >= 1);
+  await page.locator("#searchInput").press("Alt+ArrowUp");
+  assert.equal(await page.locator("#searchInput").inputValue(), "satp", "Alt+Up should restore local query history");
+  await page.locator("#searchInput").fill("");
+  await page.keyboard.press("Escape");
 
   const aarch32RegisterYaml = `schema_version: 2
 sensor: "ARM_A32_UI_TEST"
@@ -884,6 +912,69 @@ ${mProfileBulkRegisters}
 
   await page.selectOption("#chipSelect", { label: "RK3588_DWC3" });
   await page.locator("#tableViewButton").click();
+  await page.locator("#searchInput").fill("bus error address");
+  await waitForSearch();
+  const mixedSearchGroups = await page.locator(".search-result-group").allTextContents();
+  assert.equal(mixedSearchGroups[0], "寄存器与位域");
+  assert.ok(mixedSearchGroups.includes("说明与备注"));
+  const mixedSearchOrder = await page.locator("#searchResults > *").evaluateAll((items) => {
+    let section = "";
+    return items.flatMap((item) => {
+      if (item.classList.contains("search-result-group")) {
+        section = item.textContent.trim();
+        return [];
+      }
+      return item.classList.contains("search-result") ? [{ section, title: item.querySelector(".search-result-title")?.textContent }] : [];
+    });
+  });
+  const firstDescription = mixedSearchOrder.findIndex((item) => item.section === "说明与备注");
+  assert.ok(firstDescription > 0);
+  assert.ok(mixedSearchOrder.slice(0, firstDescription).some((item) => /GBUSERRADDR|buserraddrvld/i.test(item.title)));
+  assert.match(await page.locator(".search-result-match").first().innerText(), /^命中：/);
+  assert.equal(await page.locator(".search-result-language").count(), 0, "results should explain the matched field instead of exposing EN badges");
+
+  let addressRegister = "";
+  for (const addressQuery of ["0xC118", "C118"]) {
+    await page.locator("#searchInput").fill(addressQuery);
+    await waitForSearch();
+    const title = await page.locator(".search-result[data-kind='register'] .search-result-title").first().innerText();
+    if (!addressRegister) addressRegister = title;
+    assert.equal(title, addressRegister, "0x-prefixed and unprefixed addresses should resolve identically");
+    assert.match(await page.locator(".search-result[data-kind='register'] .search-result-match").first().innerText(), /地址/);
+  }
+
+  await page.locator("#searchInput").fill("chip:RK3588 type:field access:ro buserraddrvld");
+  await waitForSearch();
+  assert.deepEqual(await page.locator(".search-filter:not(.invalid) > span").allTextContents(), [
+    "chip:RK3588", "type:field", "access:ro",
+  ]);
+  assert.ok(await page.locator(".search-result[data-kind='field']").filter({ hasText: "buserraddrvld" }).count() >= 1);
+  await page.locator('.search-filter[data-search-filter-token="access:ro"]').click();
+  await waitForSearch();
+  assert.doesNotMatch(await page.locator("#searchInput").inputValue(), /access:/);
+  assert.equal(await page.locator(".search-filter:not(.invalid)").count(), 2);
+
+  await page.locator("#searchInput").fill("type:");
+  await page.waitForFunction(() => document.querySelector(".search-filter.invalid") && document.querySelector("#searchActivity")?.hidden);
+  assert.match(await page.locator(".search-filter.invalid").innerText(), /缺少值/);
+  await page.locator(".search-filter.invalid").click();
+  assert.equal(await page.locator("#searchInput").inputValue(), "");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#searchInput").fill("bus error address");
+  await waitForSearch();
+  assert.equal(
+    await page.evaluate(() => {
+      const panel = document.querySelector("#searchPanel");
+      return document.documentElement.scrollWidth <= window.innerWidth
+        && panel.getBoundingClientRect().right <= window.innerWidth
+        && panel.scrollWidth <= panel.clientWidth;
+    }),
+    true,
+    "search results should not overflow a narrow viewport",
+  );
+  await page.setViewportSize({ width: 1280, height: 800 });
+
   await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG0");
   await waitForSearch();
   await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_GSBUSCFG0" }).first().click();
@@ -1217,6 +1308,34 @@ pages:
             if (command === "search_index_status") {
               return { ready: true, indexedChips: records.length, totalChips: records.length };
             }
+            if (command === "search_registers") {
+              const record = records.find((item) => item.sensor.toLowerCase().includes(String(args.query || "").toLowerCase()));
+              return {
+                results: record ? [{
+                  kind: "chip",
+                  chipId: record.id,
+                  chipName: record.sensor,
+                  category: record.category,
+                  enabled: record.enabled,
+                  pageName: "",
+                  registerIndex: null,
+                  registerName: "",
+                  registerLocator: "",
+                  fieldName: "",
+                  fieldBits: "",
+                  title: record.sensor,
+                  snippet: "",
+                  matchLanguage: "identifier",
+                  resultType: "chip",
+                  matchKind: "name",
+                  matchTerms: [args.query],
+                  section: "entities",
+                }] : [],
+                filters: [],
+                issues: [],
+                suggestion: "",
+              };
+            }
             if (command === "set_chip_enabled") {
               records.find((record) => record.id === args.chipId).enabled = args.enabled;
               return null;
@@ -1226,7 +1345,7 @@ pages:
               return null;
             }
             if (command === "delete_chip") {
-              records = records.filter((record) => record.id !== args.chipId || record.builtin);
+              records = records.filter((record) => record.id !== args.chipId);
               return null;
             }
             throw new Error(`unexpected command: ${command}`);
@@ -1244,7 +1363,7 @@ pages:
   await libraryPage.locator("#libraryQuickButton").click();
   await libraryPage.waitForSelector("#libraryBackdrop:not([hidden])");
   assert.equal(await libraryPage.locator(".library-row").count(), 3);
-  assert.equal(await libraryPage.locator(".library-protected").count(), 1);
+  assert.equal(await libraryPage.locator(".library-protected").count(), 0);
 
   await libraryPage.locator('.library-row[data-chip-id="mock:imported"] [data-library-action="select"]').check();
   await libraryPage.locator('.library-row[data-chip-id="mock:linked"] [data-library-action="select"]').check();
@@ -1257,11 +1376,24 @@ pages:
   await libraryPage.locator("#libraryBatchCategoryButton").click();
   await libraryPage.waitForFunction(() => Array.from(document.querySelectorAll('.library-row[data-chip-id^="mock:"] .category-input')).every((input) => input.value === "惯性传感器"));
 
+  await libraryPage.locator("#libraryCloseButton").click();
+  await libraryPage.locator("#searchInput").fill("IMPORTED64");
+  await libraryPage.waitForFunction(() => document.querySelector(".search-result[data-kind='chip']"));
+  assert.match(await libraryPage.locator(".search-result-hidden").innerText(), /已隐藏/);
+  await libraryPage.locator(".search-result[data-kind='chip']").click();
+  await libraryPage.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent.includes("临时查看"));
+  assert.match(await libraryPage.locator("#chipSelect option:checked").innerText(), /临时查看/);
+  await libraryPage.goBack();
+  await libraryPage.waitForFunction(() => document.activeElement?.id === "searchInput");
+  await libraryPage.keyboard.press("Escape");
+  await libraryPage.locator("#libraryQuickButton").click();
+  await libraryPage.waitForSelector("#libraryBackdrop:not([hidden])");
+
   await libraryPage.locator("#librarySelectAll").check();
   assert.equal(await libraryPage.locator("#librarySelectionSummary").innerText(), "已选择 3 个");
   await libraryPage.locator("#libraryRemoveSelectedButton").click();
   await libraryPage.waitForSelector("#libraryRemoveDialog[open]");
-  assert.match(await libraryPage.locator("#libraryRemoveSummary").innerText(), /2 个芯片/);
+  assert.match(await libraryPage.locator("#libraryRemoveSummary").innerText(), /3 个芯片/);
   assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /1 条本地备注/);
   assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /1 个附件关联/);
   assert.match(await libraryPage.locator("#libraryRemoveImpact").innerText(), /再次关联该目录时可能重新出现/);
@@ -1271,13 +1403,12 @@ pages:
 
   await libraryPage.locator("#libraryRemoveSelectedButton").click();
   await libraryPage.locator("#libraryRemoveConfirmButton").click();
-  await libraryPage.waitForFunction(() => document.querySelectorAll(".library-row").length === 1);
-  assert.equal(await libraryPage.locator(".library-row .library-chip-name strong").innerText(), "BUILTIN64");
+  await libraryPage.waitForFunction(() => document.querySelectorAll(".library-row").length === 0);
   assert.equal(await libraryPage.locator("#libraryRemoveSelectedButton").isDisabled(), true);
-  assert.match(await libraryPage.locator("#libraryStatus").innerText(), /移除 2 个芯片/);
+  assert.match(await libraryPage.locator("#libraryStatus").innerText(), /移除 3 个芯片/);
   assert.deepEqual(
     await libraryPage.evaluate(() => window.__libraryCommands.filter((item) => item.command === "delete_chip").map((item) => item.args.chipId)),
-    ["mock:imported", "mock:linked"],
+    ["builtin:test64", "mock:imported", "mock:linked"],
   );
 
   await libraryPage.setViewportSize({ width: 390, height: 844 });

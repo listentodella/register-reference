@@ -12,12 +12,6 @@ mod search;
 mod translation;
 mod validation;
 
-const BUILTIN_CHIPS: [(&str, &str, &str); 1] = [(
-    "builtin:dwc3-rk3588",
-    "dwc3_rk3588.yaml",
-    include_str!("../../dwc3_rk3588.yaml"),
-)];
-
 #[derive(Clone)]
 struct DatabasePath(PathBuf);
 
@@ -227,11 +221,57 @@ fn add_column_if_missing(
     Ok(())
 }
 
+fn remove_legacy_builtin_chips(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("无法开始清理内置芯片事务：{error}"))?;
+    let legacy = {
+        let mut statement = transaction
+            .prepare("SELECT id, source_sha256 FROM chips WHERE builtin = 1")
+            .map_err(|error| format!("无法读取旧内置芯片：{error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("无法查询旧内置芯片：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取旧内置芯片：{error}"))?;
+        rows
+    };
+    for (chip_id, _) in &legacy {
+        transaction
+            .execute("DELETE FROM register_notes WHERE chip_id = ?1", [chip_id])
+            .map_err(|error| format!("无法清理内置芯片备注：{error}"))?;
+        transaction
+            .execute("DELETE FROM chip_attachments WHERE chip_id = ?1", [chip_id])
+            .map_err(|error| format!("无法清理内置芯片附件关联：{error}"))?;
+        transaction
+            .execute("DELETE FROM search_documents WHERE chip_id = ?1", [chip_id])
+            .map_err(|error| format!("无法清理内置芯片搜索索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM chips WHERE id = ?1", [chip_id])
+            .map_err(|error| format!("无法清理内置芯片：{error}"))?;
+    }
+    for (_, source_sha256) in legacy {
+        transaction
+            .execute(
+                "DELETE FROM translations
+                 WHERE source_sha256 = ?1
+                   AND NOT EXISTS (SELECT 1 FROM chips WHERE source_sha256 = ?1)",
+                [source_sha256],
+            )
+            .map_err(|error| format!("无法清理内置芯片孤立译文：{error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交内置芯片清理：{error}"))
+}
+
 fn initialize_database(path: &DatabasePath) -> Result<(), String> {
     if let Some(parent) = path.0.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("无法创建数据目录：{error}"))?;
     }
-    let connection = open_database(path)?;
+    let mut connection = open_database(path)?;
     connection
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
         .map_err(|error| format!("无法启用芯片库并发模式：{error}"))?;
@@ -364,58 +404,7 @@ fn initialize_database(path: &DatabasePath) -> Result<(), String> {
             [],
         )
         .map_err(|error| format!("无法创建备注编码索引：{error}"))?;
-
-    for (id, source_name, yaml_text) in BUILTIN_CHIPS {
-        let metadata = parse_metadata(yaml_text)?;
-        let category = default_category(&metadata);
-        let source_sha256 = translation::sha256_hex(yaml_text);
-        let previous_sha256 = connection
-            .query_row(
-                "SELECT source_sha256 FROM chips WHERE id = ?1",
-                [id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| format!("无法读取内置芯片哈希：{error}"))?;
-        connection
-            .execute(
-                "INSERT INTO chips (
-                    id, sensor, vendor, family, device_type, category, enabled, builtin,
-                    source_kind, source_name, source_path, source_sha256, source_size,
-                    source_mtime_ns, yaml_text
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1, 'builtin', ?7, NULL, ?8, ?9, NULL, ?10)
-                 ON CONFLICT(id) DO UPDATE SET
-                    sensor = excluded.sensor,
-                    vendor = excluded.vendor,
-                    family = excluded.family,
-                    device_type = excluded.device_type,
-                    builtin = 1,
-                    source_kind = 'builtin',
-                    source_name = excluded.source_name,
-                    source_path = NULL,
-                    source_sha256 = excluded.source_sha256,
-                    source_size = excluded.source_size,
-                    source_mtime_ns = NULL,
-                    yaml_text = excluded.yaml_text,
-                    updated_at = CURRENT_TIMESTAMP",
-                params![
-                    id,
-                    metadata.sensor,
-                    metadata.vendor,
-                    metadata.family,
-                    metadata.device_type,
-                    category,
-                    source_name,
-                    source_sha256,
-                    yaml_text.len() as i64,
-                    yaml_text
-                ],
-            )
-            .map_err(|error| format!("无法写入内置芯片 {source_name}：{error}"))?;
-        if previous_sha256.as_deref() != Some(source_sha256.as_str()) {
-            search::mark_index_stale(&connection)?;
-        }
-    }
+    remove_legacy_builtin_chips(&mut connection)?;
     let stale_hashes = connection
         .prepare("SELECT id, yaml_text FROM chips WHERE source_sha256 = ''")
         .and_then(|mut statement| {
@@ -457,6 +446,7 @@ fn translation_root_string(document: &serde_yaml::Value, name: &str) -> String {
         .to_owned()
 }
 
+#[cfg(test)]
 fn parse_metadata(yaml_text: &str) -> Result<ChipMetadata, String> {
     let document: serde_yaml::Value =
         serde_yaml::from_str(yaml_text).map_err(|error| format!("YAML 解析失败：{error}"))?;
@@ -2058,12 +2048,14 @@ fn search_registers(
     query: String,
     current_chip_id: Option<String>,
     limit: Option<usize>,
-) -> Result<Vec<search::SearchResult>, String> {
+    recent_chip_ids: Option<Vec<String>>,
+) -> Result<search::SearchResponse, String> {
     search::search(
         &open_database(&database)?,
         &query,
         current_chip_id.as_deref(),
         limit.unwrap_or(100),
+        recent_chip_ids.as_deref().unwrap_or_default(),
     )
 }
 
@@ -2242,16 +2234,16 @@ fn delete_chip(database: State<'_, DatabasePath>, chip_id: String) -> Result<(),
     let transaction = connection
         .transaction()
         .map_err(|error| format!("无法开始删除事务：{error}"))?;
-    let removable = transaction
+    let exists = transaction
         .query_row(
-            "SELECT 1 FROM chips WHERE id = ?1 AND builtin = 0",
+            "SELECT 1 FROM chips WHERE id = ?1",
             params![chip_id],
             |_| Ok(()),
         )
         .optional()
         .map_err(|error| format!("无法确认芯片状态：{error}"))?
         .is_some();
-    if !removable {
+    if !exists {
         return Ok(());
     }
     transaction
@@ -2274,7 +2266,7 @@ fn delete_chip(database: State<'_, DatabasePath>, chip_id: String) -> Result<(),
         .map_err(|error| format!("无法删除芯片搜索索引：{error}"))?;
     transaction
         .execute(
-            "DELETE FROM chips WHERE id = ?1 AND builtin = 0",
+            "DELETE FROM chips WHERE id = ?1",
             params![chip_id],
         )
         .map_err(|error| format!("无法删除芯片：{error}"))?;
@@ -2537,6 +2529,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const TEST_CHIP_YAML: &str = include_str!("../../dwc3_rk3588.yaml");
 
     fn temporary_database() -> DatabasePath {
         let path = std::env::temp_dir().join(format!(
@@ -2548,26 +2541,84 @@ mod tests {
         DatabasePath(path)
     }
 
+    fn import_test_chip(connection: &Connection) -> String {
+        upsert_imported_chip(connection, TEST_CHIP_YAML, "dwc3_rk3588.yaml", None, None).unwrap()
+    }
+
     #[test]
-    fn seeds_and_updates_library_without_overwriting_user_settings() {
+    fn starts_empty_and_removes_legacy_builtin_records() {
         let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        assert!(query_chips(&connection).unwrap().is_empty());
+        let imported_id = import_test_chip(&connection);
+        connection
+            .execute(
+                "INSERT INTO chips (
+                    id, sensor, vendor, family, device_type, category, enabled, builtin,
+                    source_kind, source_name, source_path, source_sha256, source_size,
+                    source_mtime_ns, yaml_text
+                 ) SELECT ?1, sensor, vendor, family, device_type, '内置', 1, 1,
+                          'builtin', 'legacy.yaml', NULL, 'legacy-sha', source_size,
+                          NULL, yaml_text
+                   FROM chips WHERE id = ?2",
+                params!["builtin:dwc3-rk3588", imported_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO register_notes (
+                    chip_id, page_name, register_addr, register_key, register_name, kind, content
+                 ) VALUES (?1, 'MMIO', 49408, 'legacy', 'USB3OTG_GSBUSCFG0', 'note', 'legacy note')",
+                ["builtin:dwc3-rk3588"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO chip_attachments (chip_id, file_name, file_path)
+                 VALUES (?1, 'legacy.pdf', '/tmp/legacy.pdf')",
+                ["builtin:dwc3-rk3588"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO translations (
+                    source_sha256, source_file, source_locale, locale, status, coverage,
+                    method, translator, updated, yaml_text, source_key
+                 ) VALUES ('legacy-sha', 'legacy.yaml', 'en', 'zh-CN', 'draft', 'partial',
+                           'human', 'test', '2026-08-19', 'legacy translation', 'legacy')",
+                [],
+            )
+            .unwrap();
+        rebuild_chip_search_index(&connection, "builtin:dwc3-rk3588").unwrap();
+        drop(connection);
+
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
         let records = query_chips(&connection).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records.iter().filter(|record| record.builtin).count(), 1);
-
-        update_chip_category(&connection, "builtin:dwc3-rk3588", "自定义").unwrap();
-        update_chip_enabled(&connection, "builtin:dwc3-rk3588", false).unwrap();
-        drop(connection);
-        initialize_database(&database).unwrap();
-        let records = query_chips(&open_database(&database).unwrap()).unwrap();
-        let dwc3 = records
-            .iter()
-            .find(|record| record.id == "builtin:dwc3-rk3588")
-            .unwrap();
-        assert_eq!(dwc3.category, "自定义");
-        assert!(!dwc3.enabled);
+        assert_eq!(records[0].id, imported_id);
+        assert!(!records[0].builtin);
+        for table in ["register_notes", "chip_attachments", "search_documents"] {
+            let count = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE chip_id = ?1"),
+                    ["builtin:dwc3-rk3588"],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "legacy rows remain in {table}");
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM translations WHERE source_sha256 = 'legacy-sha'",
+                    [],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap(),
+            0
+        );
         let _ = fs::remove_file(database.0);
     }
 
@@ -2576,11 +2627,12 @@ mod tests {
         let database = temporary_database();
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
+        let chip_id = import_test_chip(&connection);
         upsert_register_note(
             &connection,
             &RegisterNoteInput {
                 note_id: None,
-                chip_id: "builtin:dwc3-rk3588".to_owned(),
+                chip_id: chip_id.clone(),
                 page_name: "MMIO".to_owned(),
                 register_addr: Some(0xC100),
                 register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
@@ -2593,7 +2645,7 @@ mod tests {
         let records = query_chips(&connection).unwrap();
         let selected: Vec<_> = records
             .into_iter()
-            .filter(|record| record.id == "builtin:dwc3-rk3588")
+            .filter(|record| record.id == chip_id)
             .collect();
         let html = build_standalone_html(&selected, true).unwrap();
         assert!(html.contains("window.REGISTER_CHIPS="));
@@ -2617,7 +2669,8 @@ mod tests {
         let database = temporary_database();
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
-        let source_text = BUILTIN_CHIPS[0].2;
+        let chip_id = import_test_chip(&connection);
+        let source_text = TEST_CHIP_YAML;
         let source_sha256 = translation::sha256_hex(source_text);
         let sidecar = format!(
             r#"translation_schema_version: 1
@@ -2638,10 +2691,7 @@ translations:
         );
         upsert_translation(&connection, &sidecar, "rk3588-dwc3.zh-CN.yaml", None).unwrap();
         let records = query_chips(&connection).unwrap();
-        let record = records
-            .iter()
-            .find(|record| record.id == "builtin:dwc3-rk3588")
-            .unwrap();
+        let record = records.iter().find(|record| record.id == chip_id).unwrap();
         assert_eq!(record.translations.len(), 1);
         assert_eq!(record.translations[0].locale, "zh-CN");
         assert!(build_standalone_html(std::slice::from_ref(record), false)
@@ -2666,12 +2716,13 @@ translations:
         let database = temporary_database();
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
+        let chip_id = import_test_chip(&connection);
 
         let notes = upsert_register_note(
             &connection,
             &RegisterNoteInput {
                 note_id: None,
-                chip_id: "builtin:dwc3-rk3588".to_owned(),
+                chip_id: chip_id.clone(),
                 page_name: "MMIO".to_owned(),
                 register_addr: Some(0xC100),
                 register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
@@ -2688,7 +2739,7 @@ translations:
             &connection,
             &RegisterNoteInput {
                 note_id: Some(notes[0].id),
-                chip_id: "builtin:dwc3-rk3588".to_owned(),
+                chip_id: chip_id.clone(),
                 page_name: "MMIO".to_owned(),
                 register_addr: Some(0xC100),
                 register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
@@ -2702,11 +2753,9 @@ translations:
         assert_eq!(notes[0].kind, "warning");
         assert_eq!(notes[0].content, "切换量程后等待数据稳定");
 
-        assert!(
-            remove_register_note(&connection, "builtin:dwc3-rk3588", notes[0].id)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(remove_register_note(&connection, &chip_id, notes[0].id)
+            .unwrap()
+            .is_empty());
         let _ = fs::remove_file(database.0);
     }
 
@@ -3061,12 +3110,13 @@ pages:
         let database = temporary_database();
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
+        let chip_id = import_test_chip(&connection);
         let attachment_path = database.0.with_extension("reference-manual.pdf");
         fs::write(&attachment_path, b"local attachment content").unwrap();
 
         let (attachments, added, failures) = add_attachment_paths(
             &connection,
-            "builtin:dwc3-rk3588",
+            &chip_id,
             std::slice::from_ref(&attachment_path),
         )
         .unwrap();
@@ -3078,7 +3128,7 @@ pages:
 
         let (deduplicated, added, _) = add_attachment_paths(
             &connection,
-            "builtin:dwc3-rk3588",
+            &chip_id,
             std::slice::from_ref(&attachment_path),
         )
         .unwrap();
@@ -3088,14 +3138,14 @@ pages:
         let selected: Vec<_> = query_chips(&connection)
             .unwrap()
             .into_iter()
-            .filter(|record| record.id == "builtin:dwc3-rk3588")
+            .filter(|record| record.id == chip_id)
             .collect();
         let html = build_standalone_html(&selected, true).unwrap();
         assert!(!html.contains(&attachment_path.to_string_lossy().into_owned()));
         assert!(!html.contains(&attachments[0].file_name));
 
         assert!(
-            remove_chip_attachment(&connection, "builtin:dwc3-rk3588", attachments[0].id,)
+            remove_chip_attachment(&connection, &chip_id, attachments[0].id,)
                 .unwrap()
                 .is_empty()
         );
@@ -3134,6 +3184,12 @@ pages:
         assert_eq!(linked.category, "实验分类");
         assert_eq!(linked.source_kind, "linked");
         assert!(!linked.builtin);
+        let refreshed_search =
+            search::search(&connection, "RK3588_DWC3_TEST", Some(&id), 100, &[]).unwrap();
+        assert!(refreshed_search
+            .results
+            .iter()
+            .any(|result| result.kind == "chip" && result.chip_id == id));
         drop(connection);
         let _ = fs::remove_file(linked_path);
         let _ = fs::remove_file(database.0);
@@ -3155,28 +3211,38 @@ pages:
         rebuild_chip_search_index(&connection, &chip_id).unwrap();
 
         let register_results =
-            search::search(&connection, "USB3OTG_GSBUSCFG0", Some(&chip_id), 100).unwrap();
-        assert!(register_results.iter().any(|result| {
+            search::search(&connection, "USB3OTG_GSBUSCFG0", Some(&chip_id), 100, &[]).unwrap();
+        assert!(register_results.results.iter().any(|result| {
             result.kind == "register" && result.register_name == "USB3OTG_GSBUSCFG0"
         }));
-        let field_results = search::search(&connection, "datbigend", Some(&chip_id), 100).unwrap();
+        let field_results =
+            search::search(&connection, "datbigend", Some(&chip_id), 100, &[]).unwrap();
         assert!(field_results
+            .results
             .iter()
             .any(|result| { result.kind == "field" && result.field_name == "datbigend" }));
-        let fuzzy_results = search::search(&connection, "GSBUSCFG", Some(&chip_id), 100).unwrap();
+        let fuzzy_results =
+            search::search(&connection, "GSBUSCFG", Some(&chip_id), 100, &[]).unwrap();
         assert!(fuzzy_results
+            .results
             .iter()
             .any(|result| result.register_name == "USB3OTG_GSBUSCFG0"));
         let typo_results =
-            search::search(&connection, "USB3OTG_GSBUSCF0", Some(&chip_id), 100).unwrap();
+            search::search(&connection, "USB3OTG_GSBUSCF0", Some(&chip_id), 100, &[]).unwrap();
         assert!(typo_results
+            .results
             .iter()
             .any(|result| result.register_name == "USB3OTG_GSBUSCFG0"));
-        let address_results = search::search(&connection, "0xC100", Some(&chip_id), 100).unwrap();
-        assert_eq!(address_results[0].register_name, "USB3OTG_GSBUSCFG0");
+        let address_results =
+            search::search(&connection, "0xC100", Some(&chip_id), 100, &[]).unwrap();
+        assert_eq!(
+            address_results.results[0].register_name,
+            "USB3OTG_GSBUSCFG0"
+        );
         update_chip_enabled(&connection, &chip_id, false).unwrap();
-        let hidden = search::search(&connection, "USB3OTG_GSBUSCFG0", None, 100).unwrap();
+        let hidden = search::search(&connection, "USB3OTG_GSBUSCFG0", None, 100, &[]).unwrap();
         assert!(hidden
+            .results
             .iter()
             .any(|result| result.register_name == "USB3OTG_GSBUSCFG0" && !result.enabled));
         let _ = fs::remove_file(database.0);
@@ -3187,9 +3253,9 @@ pages:
         let database = temporary_database();
         initialize_database(&database).unwrap();
         let connection = open_database(&database).unwrap();
-        let chip_id = "builtin:dwc3-rk3588";
-        rebuild_chip_search_index(&connection, chip_id).unwrap();
-        let source_sha256 = translation::sha256_hex(BUILTIN_CHIPS[0].2);
+        let chip_id = import_test_chip(&connection);
+        rebuild_chip_search_index(&connection, &chip_id).unwrap();
+        let source_sha256 = translation::sha256_hex(TEST_CHIP_YAML);
         let sidecar = format!(
             r#"translation_schema_version: 1
 format: "register-reference-translation"
@@ -3215,9 +3281,9 @@ translations:
 "#
         );
         upsert_translation(&connection, &sidecar, "rk3588-dwc3.zh-CN.yaml", None).unwrap();
-        rebuild_chip_search_index(&connection, chip_id).unwrap();
-        let translated = search::search(&connection, "大端模式", Some(chip_id), 100).unwrap();
-        assert!(translated.iter().any(|result| {
+        rebuild_chip_search_index(&connection, &chip_id).unwrap();
+        let translated = search::search(&connection, "大端模式", Some(&chip_id), 100, &[]).unwrap();
+        assert!(translated.results.iter().any(|result| {
             result.kind == "field"
                 && result.field_name == "datbigend"
                 && result.match_language == "zh-CN"
@@ -3237,11 +3303,14 @@ translations:
             },
         )
         .unwrap();
-        rebuild_note_search_index(&connection, chip_id).unwrap();
-        assert!(search::search(&connection, "总线空闲", Some(chip_id), 100)
-            .unwrap()
-            .iter()
-            .any(|result| result.kind == "note"));
+        rebuild_note_search_index(&connection, &chip_id).unwrap();
+        assert!(
+            search::search(&connection, "总线空闲", Some(&chip_id), 100, &[])
+                .unwrap()
+                .results
+                .iter()
+                .any(|result| result.kind == "note")
+        );
 
         upsert_register_note(
             &connection,
@@ -3257,22 +3326,27 @@ translations:
             },
         )
         .unwrap();
-        rebuild_note_search_index(&connection, chip_id).unwrap();
-        assert!(search::search(&connection, "总线空闲", Some(chip_id), 100)
-            .unwrap()
-            .is_empty());
+        rebuild_note_search_index(&connection, &chip_id).unwrap();
         assert!(
-            search::search(&connection, "描述符队列", Some(chip_id), 100)
+            search::search(&connection, "总线空闲", Some(&chip_id), 100, &[])
                 .unwrap()
+                .results
+                .is_empty()
+        );
+        assert!(
+            search::search(&connection, "描述符队列", Some(&chip_id), 100, &[])
+                .unwrap()
+                .results
                 .iter()
                 .any(|result| result.kind == "note")
         );
 
-        remove_register_note(&connection, chip_id, notes[0].id).unwrap();
-        rebuild_note_search_index(&connection, chip_id).unwrap();
+        remove_register_note(&connection, &chip_id, notes[0].id).unwrap();
+        rebuild_note_search_index(&connection, &chip_id).unwrap();
         assert!(
-            search::search(&connection, "描述符队列", Some(chip_id), 100)
+            search::search(&connection, "描述符队列", Some(&chip_id), 100, &[])
                 .unwrap()
+                .results
                 .is_empty()
         );
         let _ = fs::remove_file(database.0);
@@ -3314,6 +3388,97 @@ pages:
         assert!(error.contains("YAML 规范校验未通过"));
         assert!(error.contains("超出寄存器有效位宽"));
         assert_eq!(query_chips(&connection).unwrap().len(), before);
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    #[ignore = "requires REGISTER_SEARCH_BENCH_DB and rebuilds a temporary copy"]
+    fn benchmarks_real_search_library() {
+        let source = std::env::var("REGISTER_SEARCH_BENCH_DB")
+            .expect("REGISTER_SEARCH_BENCH_DB must point to a register library database");
+        let database = temporary_database();
+        fs::copy(&source, &database.0).unwrap();
+        let baseline_bytes = fs::metadata(&database.0).unwrap().len();
+        initialize_database(&database).unwrap();
+        let mut connection = open_database(&database).unwrap();
+        let chip_ids = query_chips(&connection)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        let current_chip_id = chip_ids.first().map(String::as_str);
+
+        let rebuild_started = std::time::Instant::now();
+        let transaction = connection.transaction().unwrap();
+        search::mark_index_stale(&transaction).unwrap();
+        transaction
+            .execute("DELETE FROM search_documents", [])
+            .unwrap();
+        for chip_id in &chip_ids {
+            rebuild_chip_search_index(&transaction, chip_id).unwrap();
+        }
+        search::mark_index_ready(&transaction).unwrap();
+        transaction.commit().unwrap();
+        let rebuild_ms = rebuild_started.elapsed().as_millis();
+        connection.execute_batch("VACUUM").unwrap();
+
+        let document_count = connection
+            .query_row("SELECT COUNT(*) FROM search_documents", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap();
+        let index_bytes = connection
+            .query_row(
+                "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
+                 WHERE name = 'search_documents' OR name LIKE 'search_fts%'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap();
+        let database_bytes = fs::metadata(&database.0).unwrap().len();
+        let queries = [
+            "bus error address",
+            "USB3OTG_GBUSERRADDRLO",
+            "USB3OTG_GBUSERRADDRL0",
+            "总线错误地址",
+            "Global SoC Bus Configuration Register",
+            "0xC118",
+            "C118",
+            "chip:m3 type:field access:rw overflow",
+            "bits:31:28",
+        ];
+        for query in queries {
+            let response = search::search(&connection, query, current_chip_id, 100, &[]).unwrap();
+            assert!(
+                !response.results.is_empty(),
+                "representative query returned no results: {query}"
+            );
+        }
+
+        let mut samples = Vec::new();
+        let mut query_samples = vec![Vec::new(); queries.len()];
+        for _ in 0..30 {
+            for (query_index, query) in queries.iter().enumerate() {
+                let started = std::time::Instant::now();
+                search::search(&connection, query, current_chip_id, 100, &[]).unwrap();
+                let elapsed = started.elapsed().as_micros();
+                samples.push(elapsed);
+                query_samples[query_index].push(elapsed);
+            }
+        }
+        samples.sort_unstable();
+        let p50_us = samples[samples.len() / 2];
+        let p95_us = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+        println!(
+            "search-benchmark baseline_bytes={baseline_bytes} database_bytes={database_bytes} index_bytes={index_bytes} chips={} documents={document_count} rebuild_ms={rebuild_ms} p50_us={p50_us} p95_us={p95_us}",
+            chip_ids.len()
+        );
+        for (query, mut timings) in queries.into_iter().zip(query_samples) {
+            timings.sort_unstable();
+            let query_p50 = timings[timings.len() / 2];
+            let query_p95 = timings[(timings.len() * 95 / 100).min(timings.len() - 1)];
+            println!("search-query query={query:?} p50_us={query_p50} p95_us={query_p95}");
+        }
         let _ = fs::remove_file(database.0);
     }
 }

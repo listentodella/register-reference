@@ -2,11 +2,13 @@
 
 这是一个 Tauri v2 + vanilla HTML/CSS/JavaScript 的本地寄存器资料库。芯片定义仍使用可移植的 YAML；SQLite 只保存导入来源、分类、启用状态等本地管理信息，不污染 YAML。
 
-## 当前数据
+## 示例数据
 
 - `dwc3_rk3588.yaml`
 
-可公开复用的寄存器数据已独立维护在 [register-yaml-library](https://github.com/listentodella/register-yaml-library)，并按架构、控制器、接口和厂商分类。该仓库提供机器可读 `catalog.json`、来源许可说明和自动规范校验；本查看器仓库只保留适合作为离线默认示例的内置数据。
+可公开复用的寄存器数据已独立维护在 [register-yaml-library](https://github.com/listentodella/register-yaml-library)，并按架构、控制器、接口和厂商分类。该仓库提供机器可读 `catalog.json`、来源许可说明和自动规范校验；本查看器仓库只保留示例和测试所需的少量 YAML。
+
+查看器默认以空芯片库启动，不再自动载入仓库中的 YAML。用户可以按需导入单个 YAML 或关联寄存器库目录；升级时，旧版本遗留的内置芯片条目会从本地数据库移除。仓库中的 `dwc3_rk3588.yaml` 仅作为格式示例、测试夹具和手动导入资料保留。
 
 `dwc3_rk3588.yaml` 只以 Rockchip 原始文档为寄存器事实来源：
 
@@ -131,7 +133,7 @@ MMIO 备注通过芯片、页面、寄存器地址和名称定位；系统寄存
 
 附件与关联寄存器库目录保存本机绝对路径，因此复制数据库到另一台电脑或另一种操作系统后，需要重新关联这些本地文件；芯片数据、译文正文、分类和备注不受影响。
 
-根目录导入的 YAML、构建生成的 `data/chips.data.js` 和单文件 HTML 默认不会进入 Git。需要发布新的公开内置芯片时，应先确认资料授权，再在 `.gitignore` 中显式放行对应 YAML，并在 Rust 内置芯片表中登记。普通用户导入的 YAML 只保存在本机资料库中。
+根目录导入的 YAML、构建生成的 `data/chips.data.js` 和单文件 HTML 默认不会进入 Git。需要提交新的公开示例 YAML 时，应先确认资料授权，再在 `.gitignore` 中显式放行对应文件；示例文件不会被工具自动载入。普通用户导入的 YAML 只保存在本机资料库中。
 
 ## YAML 工作流
 

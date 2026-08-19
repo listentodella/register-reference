@@ -2,6 +2,8 @@
   const chips = Array.isArray(window.REGISTER_CHIPS) ? window.REGISTER_CHIPS : [];
   const THEME_STORAGE_KEY = "register-reference.theme";
   const LANGUAGE_STORAGE_KEY = "register-reference.language-mode";
+  const SEARCH_RECENT_STORAGE_KEY = "register-reference.search-recent";
+  const SEARCH_HISTORY_STORAGE_KEY = "register-reference.search-history";
   const NAVIGATION_STATE_KEY = "registerReferenceNavigation";
   const SYSTEM_SEARCH_RESULT_LIMIT = 200;
   const themeLabels = {
@@ -20,12 +22,19 @@
     query: "",
     searchQuery: "",
     searchResults: [],
+    searchFilters: [],
+    searchIssues: [],
+    searchSuggestion: "",
     searchActiveIndex: -1,
     searchOpen: false,
     searchLoading: false,
     searchRequestId: 0,
     searchIndexReady: false,
     searchFallbackFiltering: false,
+    searchRecent: [],
+    searchHistory: [],
+    searchHistoryIndex: -1,
+    searchHistoryDraft: "",
     registerValues: new Map(),
     activeHoverAddress: null,
     loadMessage: "",
@@ -83,6 +92,7 @@
     searchControl: document.getElementById("searchControl"),
     searchPanel: document.getElementById("searchPanel"),
     searchSummary: document.getElementById("searchSummary"),
+    searchFilters: document.getElementById("searchFilters"),
     searchResults: document.getElementById("searchResults"),
     searchActivity: document.getElementById("searchActivity"),
     languageSwitcher: document.getElementById("languageSwitcher"),
@@ -310,13 +320,112 @@
     register: "寄存器",
     field: "位域",
     enum: "枚举",
+    description: "说明",
     note: "备注",
   };
 
-  function highlightSearchMatch(value, query = state.searchQuery) {
+  const searchMatchLabels = {
+    register_name: "寄存器名",
+    alias: "别名 / 访问器",
+    system_encoding: "系统编码",
+    address: "地址",
+    field_name: "位域名",
+    bits: "位范围",
+    name: "名称",
+    enum_name: "枚举名称",
+    enum_value: "枚举值",
+    translated_description: "中文说明",
+    source_description: "英文说明",
+    note: "备注",
+    fuzzy_name: "相近名称",
+    filter: "筛选条件",
+    recent: "最近跳转",
+  };
+
+  const searchSectionLabels = {
+    entities: "寄存器与位域",
+    text: "说明与备注",
+    suggestions: "相近名称",
+    recent: "最近跳转",
+  };
+
+  function readSearchStorage(key) {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(key) || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function writeSearchStorage(key, value) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (_error) {
+      // Search history is an optional local convenience.
+    }
+  }
+
+  function recentResultKey(result) {
+    return [result.chipId, result.pageName, result.registerIndex, result.registerName, result.fieldName, result.fieldBits].join("|");
+  }
+
+  function rememberSearchResult(result) {
+    if (!result?.chipId) return;
+    const stored = {
+      kind: result.kind,
+      chipId: result.chipId,
+      chipName: result.chipName,
+      category: result.category,
+      enabled: result.enabled,
+      pageName: result.pageName,
+      registerIndex: result.registerIndex,
+      registerName: result.registerName,
+      registerLocator: result.registerLocator,
+      fieldName: result.fieldName,
+      fieldBits: result.fieldBits,
+      title: result.title,
+      resultType: result.resultType || result.kind,
+      matchKind: "recent",
+      matchTerms: [],
+      matchLanguage: "identifier",
+      snippet: "",
+      section: "recent",
+    };
+    state.searchRecent = [stored, ...state.searchRecent.filter((item) => recentResultKey(item) !== recentResultKey(stored))].slice(0, 8);
+    writeSearchStorage(SEARCH_RECENT_STORAGE_KEY, state.searchRecent);
+  }
+
+  function rememberSearchQuery(query) {
+    const value = String(query || "").trim();
+    if (!value) return;
+    state.searchHistory = [value, ...state.searchHistory.filter((item) => item !== value)].slice(0, 20);
+    state.searchHistoryIndex = -1;
+    state.searchHistoryDraft = "";
+    writeSearchStorage(SEARCH_HISTORY_STORAGE_KEY, state.searchHistory);
+  }
+
+  function restoreSearchHistory(direction) {
+    if (!state.searchHistory.length) return false;
+    if (state.searchHistoryIndex < 0) state.searchHistoryDraft = els.searchInput.value;
+    state.searchHistoryIndex = Math.max(-1, Math.min(state.searchHistory.length - 1, state.searchHistoryIndex + direction));
+    const value = state.searchHistoryIndex < 0 ? state.searchHistoryDraft : state.searchHistory[state.searchHistoryIndex];
+    els.searchInput.value = value;
+    state.searchQuery = value.trim();
+    scheduleSearch(true);
+    return true;
+  }
+
+  function recentChipIds() {
+    return [...new Set(state.searchRecent.map((result) => result.chipId).filter(Boolean))];
+  }
+
+  function highlightSearchMatch(value, terms = []) {
     const source = String(value || "");
-    if (!query) return escapeHtml(source);
-    const expression = new RegExp(`(${String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig");
+    const matches = [...new Set((terms || []).map(String).map((term) => term.trim()).filter(Boolean))]
+      .sort((left, right) => right.length - left.length);
+    if (!matches.length) return escapeHtml(source);
+    const expression = new RegExp(`(${matches.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "ig");
     return source.split(expression).map((part, index) => index % 2 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)).join("");
   }
 
@@ -339,7 +448,7 @@
   }
 
   function openSearchPanel() {
-    if (!state.searchQuery) return;
+    if (!state.searchQuery && !state.searchResults.length && !state.searchIssues.length) return;
     state.searchOpen = true;
     els.searchPanel.hidden = false;
     els.searchInput.setAttribute("aria-expanded", "true");
@@ -353,42 +462,77 @@
     if (clear) {
       state.searchQuery = "";
       state.searchResults = [];
+      state.searchFilters = [];
+      state.searchIssues = [];
+      state.searchSuggestion = "";
       state.searchActiveIndex = -1;
       els.searchInput.value = "";
     }
     if (restoreFocus) els.searchInput.focus();
   }
 
+  function renderSearchFilters() {
+    const items = [
+      ...state.searchFilters.map((filter) => ({ token: filter.token, label: `${filter.key}:${filter.value}`, invalid: false })),
+      ...state.searchIssues.map((issue) => ({ token: issue.token, label: issue.message, invalid: true })),
+    ];
+    els.searchFilters.hidden = !items.length;
+    els.searchFilters.innerHTML = items.map((item) => `
+      <button class="search-filter ${item.invalid ? "invalid" : ""}" type="button"
+        data-search-filter-token="${escapeHtml(item.token)}" title="移除 ${escapeHtml(item.token)}">
+        <span>${escapeHtml(item.label)}</span><i data-lucide="x"></i>
+      </button>
+    `).join("");
+    if (items.length) refreshIcons();
+  }
+
   function renderSearchResults() {
     const results = state.searchResults;
     const query = state.searchQuery;
-    els.searchSummary.textContent = state.searchLoading
-      ? `正在搜索“${query}”...`
-      : `${results.length} 个全库结果${results.length >= 100 ? " · 已显示前 100 项" : ""}`;
+    renderSearchFilters();
+    const entityCount = results.filter((result) => result.section === "entities").length;
+    const textCount = results.filter((result) => result.section === "text").length;
+    els.searchSummary.textContent = state.searchLoading ? `正在搜索“${query}”...`
+      : state.searchIssues.length ? "请修正或移除无效筛选"
+        : !query && results.length ? `${results.length} 个最近跳转`
+          : `${results.length} 个结果${entityCount && textCount ? ` · ${entityCount} 个实体，${textCount} 条说明/备注` : ""}${results.length >= 100 ? " · 已显示前 100 项" : ""}`;
     if (!results.length) {
-      els.searchResults.innerHTML = `<div class="search-empty">${state.searchLoading ? "正在检索寄存器、位域与说明" : `没有找到“${escapeHtml(query)}”，可尝试缩短名称或改用说明中的词语`}</div>`;
+      let message;
+      if (state.searchLoading) message = "正在检索寄存器、位域与说明";
+      else if (state.searchIssues.length) message = `<strong>${escapeHtml(state.searchIssues[0].message)}</strong><br><small>点击上方红色筛选项即可移除</small>`;
+      else if (state.searchSuggestion) message = `没有找到“${escapeHtml(query)}”<br><button class="search-suggestion" type="button" data-search-suggestion="${escapeHtml(state.searchSuggestion)}">搜索相近名称 ${escapeHtml(state.searchSuggestion)}</button>`;
+      else if (state.searchFilters.length) message = `没有结果满足当前筛选<br><small>可移除上方任一筛选项后立即重搜</small>`;
+      else if (!query) message = "暂无最近跳转<br><small>例如 chip:m3 APSR 或 addr:0xE000ED00</small>";
+      else message = `没有找到“${escapeHtml(query)}”<br><small>可缩短实体名称，但不会自动扩展为大量正文结果</small>`;
+      els.searchResults.innerHTML = `<div class="search-empty">${message}</div>`;
       return;
     }
+    let previousSection = "";
     els.searchResults.innerHTML = results.map((result, index) => {
       const active = index === state.searchActiveIndex;
       const field = result.fieldName ? ` · ${result.fieldName}${result.fieldBits ? `[${result.fieldBits}]` : ""}` : "";
       const register = result.registerName ? ` · ${result.registerName}` : "";
-      const path = [result.chipName, result.pageName].filter(Boolean).join(" / ") + register + field;
-      const locator = result.registerLocator ? `<code>${escapeHtml(result.registerLocator)}</code>` : "";
-      return `
+      const path = [...new Set([result.chipName, result.category, result.pageName].filter(Boolean))].join(" / ") + register + field;
+      const locator = result.registerLocator ? `<code>${highlightSearchMatch(result.registerLocator, result.matchTerms)}</code>` : "";
+      const bits = result.fieldBits ? `<code>[${escapeHtml(result.fieldBits)}]</code>` : "";
+      const section = result.section || "entities";
+      const heading = section !== previousSection
+        ? `<div class="search-result-group" role="presentation">${escapeHtml(searchSectionLabels[section] || section)}</div>` : "";
+      previousSection = section;
+      return `${heading}
         <button id="search-result-${index}" class="search-result ${active ? "active" : ""}" type="button" role="option"
           aria-selected="${active}" data-search-index="${index}" data-kind="${escapeHtml(result.kind)}">
-          <span class="search-result-kind">${escapeHtml(searchKindLabels[result.kind] || result.kind)}</span>
+          <span class="search-result-kind">${escapeHtml(searchKindLabels[result.resultType || result.kind] || result.resultType || result.kind)}</span>
           <span class="search-result-main">
-            <span class="search-result-title">${highlightSearchMatch(result.title || result.registerName || result.chipName)}</span>
+            <span class="search-result-title">${highlightSearchMatch(result.title || result.registerName || result.chipName, result.matchTerms)}</span>
             <span class="search-result-path">${escapeHtml(path)}</span>
           </span>
           <span class="search-result-meta">
-            ${locator}
-            ${result.matchLanguage === "zh-CN" ? `<span class="search-result-language">中文</span>` : result.matchLanguage === "source" ? `<span class="search-result-language">EN</span>` : ""}
+            ${locator}${bits}
             ${result.enabled ? "" : `<span class="search-result-hidden">已隐藏</span>`}
           </span>
-          <span class="search-result-snippet">${highlightSearchMatch(result.snippet)}</span>
+          <span class="search-result-match">命中：${escapeHtml(searchMatchLabels[result.matchKind] || result.matchKind || "名称")}</span>
+          ${result.snippet ? `<span class="search-result-snippet">${highlightSearchMatch(result.snippet, result.matchTerms)}</span>` : ""}
         </button>
       `;
     }).join("");
@@ -401,17 +545,62 @@
     }
   }
 
-  function acceptSearchResults(requestId, results) {
+  function acceptSearchResults(requestId, response) {
     if (requestId !== state.searchRequestId) return;
     const hadFallbackFilter = state.searchFallbackFiltering;
     state.searchFallbackFiltering = false;
     state.query = "";
-    state.searchResults = Array.isArray(results) ? results : [];
+    const normalized = Array.isArray(response) ? { results: response } : response || {};
+    state.searchResults = Array.isArray(normalized.results) ? normalized.results : [];
+    state.searchFilters = Array.isArray(normalized.filters) ? normalized.filters : [];
+    state.searchIssues = Array.isArray(normalized.issues) ? normalized.issues : [];
+    state.searchSuggestion = String(normalized.suggestion || "");
     state.searchActiveIndex = state.searchResults.length ? 0 : -1;
     setSearchLoading(false);
     openSearchPanel();
     if (hadFallbackFilter) render();
     renderSearchResults();
+  }
+
+  function showRecentSearchResults() {
+    state.searchResults = state.searchRecent.map((result) => ({ ...result, section: "recent", matchKind: "recent" }));
+    state.searchFilters = [];
+    state.searchIssues = [];
+    state.searchSuggestion = "";
+    state.searchActiveIndex = state.searchResults.length ? 0 : -1;
+    setSearchLoading(false);
+    state.searchOpen = true;
+    els.searchPanel.hidden = false;
+    els.searchInput.setAttribute("aria-expanded", "true");
+    renderSearchResults();
+  }
+
+  function removeSearchFilterToken(token) {
+    const source = els.searchInput.value;
+    const exactIndex = source.toLowerCase().indexOf(String(token).toLowerCase());
+    let next = source;
+    if (exactIndex >= 0) {
+      next = `${source.slice(0, exactIndex)} ${source.slice(exactIndex + String(token).length)}`;
+    } else {
+      const key = String(token).split(":", 1)[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      next = source.replace(new RegExp(`(^|\\s)${key}:(?:"[^"]*"|'[^']*'|\\S+)`, "i"), " ");
+    }
+    next = next.replace(/\s+/g, " ").trim();
+    els.searchInput.value = next;
+    state.searchQuery = next;
+    state.searchHistoryIndex = -1;
+    scheduleSearch(true);
+    els.searchInput.focus();
+  }
+
+  function useSearchSuggestion(value) {
+    const suggestion = String(value || "").trim();
+    if (!suggestion) return;
+    els.searchInput.value = suggestion;
+    state.searchQuery = suggestion;
+    state.searchHistoryIndex = -1;
+    scheduleSearch(true);
+    els.searchInput.focus();
   }
 
   async function initializeSearchWorker() {
@@ -436,7 +625,7 @@
         state.searchIndexReady = true;
         if (state.searchQuery) scheduleSearch(true);
       } else if (message.type === "results") {
-        acceptSearchResults(message.requestId, message.results);
+        acceptSearchResults(message.requestId, message.response || message.results);
       }
     });
     searchWorker.addEventListener("error", () => {
@@ -570,12 +759,13 @@
     }
     if (isDesktopApp()) {
       try {
-        const results = await getInvoke()("search_registers", {
+        const response = await getInvoke()("search_registers", {
           query,
           currentChipId: getNavigationChipId(),
           limit: 100,
+          recentChipIds: recentChipIds(),
         });
-        acceptSearchResults(requestId, results);
+        acceptSearchResults(requestId, response);
       } catch (error) {
         if (requestId !== state.searchRequestId) return;
         state.searchResults = [];
@@ -589,7 +779,14 @@
       }
       return;
     }
-    searchWorker?.postMessage({ type: "search", requestId, query, currentChipId: getNavigationChipId(), limit: 100 });
+    searchWorker?.postMessage({
+      type: "search",
+      requestId,
+      query,
+      currentChipId: getNavigationChipId(),
+      recentChipIds: recentChipIds(),
+      limit: 100,
+    });
   }
 
   function scheduleSearch(immediate = false) {
@@ -601,7 +798,7 @@
       state.searchFallbackFiltering = false;
       state.query = "";
       setSearchLoading(false);
-      closeSearchPanel();
+      showRecentSearchResults();
       if (hadFilter) render();
       return;
     }
@@ -766,6 +963,19 @@
   }
 
   function updateLanguageControl(chip = getChip()) {
+    if (!chip) {
+      els.languageSwitcher?.classList.remove("translation-available", "translation-missing");
+      els.languageSwitcher.title = "导入芯片后显示译文状态";
+      els.languageControl.dataset.translationAvailable = "false";
+      els.languageButtons.forEach((button) => {
+        button.title = button.dataset.languageMode === "en" ? "只显示英文原文" : "导入芯片后应用语言显示模式";
+      });
+      els.translationAvailability.textContent = "尚未导入芯片";
+      els.loadFolderButton.dataset.translationAvailable = "false";
+      els.loadFolderButton.title = "关联寄存器库目录";
+      els.loadFolderButton.setAttribute("aria-label", els.loadFolderButton.title);
+      return;
+    }
     const translation = getTranslationDocument(chip);
     const available = Boolean(translation);
     const chipName = chip?.sensor || "当前芯片";
@@ -889,6 +1099,8 @@
       view: state.view,
       query: "",
       searchQuery: state.searchQuery,
+      searchOpen: state.searchOpen,
+      restoreSearchFocus: false,
       scrollY: Math.max(0, Math.round(window.scrollY)),
       focusIdentity: "",
       searchTarget: null,
@@ -960,7 +1172,14 @@
 
   async function openSearchResult(result, { focus = false } = {}) {
     if (!result) return;
-    replaceNavigationState({ searchQuery: state.searchQuery, scrollY: window.scrollY });
+    rememberSearchQuery(state.searchQuery);
+    rememberSearchResult(result);
+    replaceNavigationState({
+      searchQuery: state.searchQuery,
+      searchOpen: state.searchOpen,
+      restoreSearchFocus: true,
+      scrollY: window.scrollY,
+    });
     closeSearchPanel();
     const record = libraryRecords.find((item) => item.id === result.chipId);
     if (!record) return;
@@ -987,6 +1206,8 @@
       view: state.view,
       searchQuery: state.searchQuery,
       searchTarget: result,
+      searchOpen: false,
+      restoreSearchFocus: false,
       scrollY: 0,
     });
     render();
@@ -1023,6 +1244,11 @@
     if (state.view === "matrix" && isSystemChip()) state.systemOverviewSnapshot = navigation;
 
     window.requestAnimationFrame(() => {
+      if (navigation.restoreSearchFocus) {
+        if (state.searchQuery) scheduleSearch(true);
+        else showRecentSearchResults();
+        els.searchInput.focus({ preventScroll: true });
+      }
       if (state.view === "table" && navigation.focusIdentity) {
         revealSystemRegister(navigation.focusIdentity);
         return;
@@ -3875,7 +4101,7 @@
     const enabledCount = libraryRecords.filter((record) => record.enabled).length;
     const selected = selectedLibraryRecords();
     const selectedCount = selected.length;
-    const removableCount = selected.filter((record) => !record.builtin).length;
+    const removableCount = selectedCount;
     const categories = Array.from(new Set(libraryRecords.map((record) => record.category).filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
     els.librarySummary.textContent = `${libraryRecords.length} 个芯片 · ${enabledCount} 个显示 · ${selectedCount} 个已选择`;
@@ -3884,7 +4110,7 @@
     els.libraryList.innerHTML = filtered.length
       ? filtered
           .map((record) => {
-            const sourceLabel = record.builtin ? "内置" : record.sourceKind === "linked" ? "关联目录" : "已导入";
+            const sourceLabel = record.sourceKind === "linked" ? "关联目录" : "已导入";
             const sourceDetail = record.sourcePath || record.sourceName || "";
             const translation = getRecordTranslationDocument(record);
             const translatedSensor = translation?.translations?.sensor;
@@ -3909,12 +4135,12 @@
                   <strong>${sourceLabel}</strong>
                   <span>${escapeHtml(record.sourceName || "")}</span>
                 </div>
-                ${record.builtin ? `<span class="library-protected" title="内置芯片可隐藏但不可移除"><i data-lucide="shield-check"></i></span>` : `<button class="icon-button danger library-remove-control" type="button" data-library-action="remove" title="从芯片库移除 ${escapeHtml(record.sensor)}" aria-label="从芯片库移除 ${escapeHtml(record.sensor)}"><i data-lucide="trash-2"></i></button>`}
+                <button class="icon-button danger library-remove-control" type="button" data-library-action="remove" title="从芯片库移除 ${escapeHtml(record.sensor)}" aria-label="从芯片库移除 ${escapeHtml(record.sensor)}"><i data-lucide="trash-2"></i></button>
               </div>
             `;
           })
           .join("")
-      : `<div class="empty-state">没有匹配的芯片</div>`;
+      : `<div class="empty-state">${libraryRecords.length ? "没有匹配的芯片" : "芯片库为空"}</div>`;
 
     const filteredSelectedCount = filtered.filter((record) => state.librarySelection.has(record.id)).length;
     els.librarySelectAll.checked = filtered.length > 0 && filteredSelectedCount === filtered.length;
@@ -3924,9 +4150,7 @@
     els.libraryShowSelectedButton.disabled = selectedCount === 0;
     els.libraryHideSelectedButton.disabled = selectedCount === 0;
     els.libraryRemoveSelectedButton.disabled = removableCount === 0;
-    els.libraryRemoveSelectedButton.title = removableCount
-      ? `移除 ${removableCount} 个非内置芯片`
-      : selectedCount ? "内置芯片只能隐藏" : "请先选择芯片";
+    els.libraryRemoveSelectedButton.title = removableCount ? `移除 ${removableCount} 个芯片` : "请先选择芯片";
     els.exportSelectedButton.disabled = selectedCount === 0 || !isDesktopApp();
     els.exportSelectedButton.title = isDesktopApp() ? "" : "独立 HTML 导出需要桌面版";
     setLibraryStatus(state.libraryStatus, state.libraryStatusError);
@@ -3953,6 +4177,11 @@
   }
 
   function populateChipSelect() {
+    if (!chips.length) {
+      els.chipSelect.innerHTML = '<option value="">尚未导入芯片</option>';
+      els.chipSelect.disabled = true;
+      return;
+    }
     const groups = new Map();
     chips.forEach((chip, index) => {
       const category = chip._category || "未分类";
@@ -3977,7 +4206,10 @@
     if (!pages.includes(state.pageName)) {
       state.pageName = pages[0] || "";
     }
-    els.pageSelect.innerHTML = pages.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(localizedLabel(name, getPageTranslation(name)?.title))}</option>`).join("");
+    els.pageSelect.innerHTML = pages.length
+      ? pages.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(localizedLabel(name, getPageTranslation(name)?.title))}</option>`).join("")
+      : '<option value="">尚未选择页面</option>';
+    els.pageSelect.disabled = pages.length === 0;
     els.pageSelect.value = state.pageName;
   }
 
@@ -4270,9 +4502,9 @@
   }
 
   function requestLibraryRemoval(records) {
-    const removable = records.filter((record) => !record.builtin);
+    const removable = records;
     if (!removable.length) {
-      setLibraryStatus("内置芯片不能移除，可以改为隐藏");
+      setLibraryStatus("请先选择要移除的芯片");
       renderLibraryList();
       return;
     }
@@ -4377,7 +4609,7 @@
     const row = event.target.closest("[data-chip-id]");
     if (!button || !row) return;
     const record = libraryRecords.find((item) => item.id === row.dataset.chipId);
-    if (!record || record.builtin) return;
+    if (!record) return;
 
     requestLibraryRemoval([record]);
   }
@@ -4756,14 +4988,24 @@
 
     els.searchInput.addEventListener("input", () => {
       state.searchQuery = els.searchInput.value.trim();
+      state.searchHistoryIndex = -1;
       scheduleSearch();
     });
     els.searchInput.addEventListener("focus", () => {
       if (state.searchQuery) openSearchPanel();
+      else showRecentSearchResults();
     });
     els.searchInput.addEventListener("keydown", (event) => {
+      if (event.altKey && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+        event.preventDefault();
+        restoreSearchHistory(event.key === "ArrowUp" ? 1 : -1);
+        return;
+      }
       if (!state.searchOpen || !state.searchResults.length) {
-        if (event.key === "Escape") closeSearchPanel();
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeSearchPanel({ restoreFocus: true });
+        }
         return;
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -4779,7 +5021,16 @@
         closeSearchPanel({ restoreFocus: true });
       }
     });
+    els.searchFilters.addEventListener("click", (event) => {
+      const filter = event.target.closest("[data-search-filter-token]");
+      if (filter) removeSearchFilterToken(filter.dataset.searchFilterToken);
+    });
     els.searchResults.addEventListener("click", (event) => {
+      const suggestion = event.target.closest("[data-search-suggestion]");
+      if (suggestion) {
+        useSearchSuggestion(suggestion.dataset.searchSuggestion);
+        return;
+      }
       const result = event.target.closest("[data-search-index]");
       if (!result) return;
       openSearchResult(state.searchResults[Number(result.dataset.searchIndex)]);
@@ -4889,6 +5140,13 @@
 
   function init() {
     window.jsep?.addBinaryOp("//", 10);
+    state.searchRecent = readSearchStorage(SEARCH_RECENT_STORAGE_KEY)
+      .filter((result) => result && typeof result === "object" && result.chipId)
+      .slice(0, 8);
+    state.searchHistory = readSearchStorage(SEARCH_HISTORY_STORAGE_KEY)
+      .map(String)
+      .filter(Boolean)
+      .slice(0, 20);
     applyTheme(readStoredTheme(), false);
     setLanguageMode(readStoredLanguageMode(), false);
     renderToolsMenu();
