@@ -4,10 +4,13 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
+mod core_service;
 mod search;
 mod translation;
 mod validation;
@@ -30,6 +33,8 @@ struct ChipRecord {
     source_name: String,
     source_path: Option<String>,
     source_sha256: String,
+    created_at: String,
+    updated_at: String,
     yaml_text: String,
     notes: Vec<RegisterNote>,
     attachments: Vec<ChipAttachment>,
@@ -51,6 +56,8 @@ struct ChipSummary {
     source_name: String,
     source_path: Option<String>,
     source_sha256: String,
+    created_at: String,
+    updated_at: String,
     notes: Vec<RegisterNote>,
     attachments: Vec<ChipAttachment>,
     translations: Vec<TranslationSummary>,
@@ -61,6 +68,15 @@ struct ChipSummary {
 struct ChipDocument {
     chip_data: JsonValue,
     translations: Vec<JsonValue>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterDetailsResponse {
+    chip_id: String,
+    register: core_service::RegisterDetails,
+    source: core_service::SourceMetadata,
+    notes: Vec<RegisterNote>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -166,6 +182,48 @@ struct ImportReport {
     folder: Option<String>,
     canceled: bool,
     changed_chip_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreviewReport {
+    preview_id: String,
+    files: Vec<ImportPreviewFile>,
+    failures: Vec<String>,
+    folder: Option<String>,
+    canceled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPreviewFile {
+    source_name: String,
+    kind: String,
+    sensor: String,
+    status: String,
+    source_hash_changed: bool,
+    translation_missing: bool,
+    changes: core_service::RegisterComparison,
+    #[serde(skip)]
+    source_sha256: String,
+}
+
+#[derive(Clone)]
+struct PendingImportBatch {
+    parsed: Vec<ParsedImportFile>,
+    category: Option<String>,
+    linked: bool,
+    operation: String,
+    folder: Option<String>,
+    fingerprints: Vec<(PathBuf, FileFingerprint)>,
+    failures: Vec<String>,
+    skipped: usize,
+}
+
+#[derive(Default)]
+struct PendingImports {
+    batches: Mutex<HashMap<String, PendingImportBatch>>,
+    counter: AtomicU64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -481,7 +539,7 @@ fn parse_metadata_document(
     Ok(metadata)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FileFingerprint {
     size: Option<i64>,
     mtime_ns: Option<i64>,
@@ -803,7 +861,7 @@ fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, sensor, vendor, family, device_type, category, enabled, builtin,
-                    source_kind, source_name, source_path, source_sha256, yaml_text
+                    source_kind, source_name, source_path, source_sha256, created_at, updated_at, yaml_text
              FROM chips
              ORDER BY category COLLATE NOCASE, sensor COLLATE NOCASE",
         )
@@ -823,7 +881,9 @@ fn query_chips(connection: &Connection) -> Result<Vec<ChipRecord>, String> {
                 source_name: row.get(9)?,
                 source_path: row.get(10)?,
                 source_sha256: row.get(11)?,
-                yaml_text: row.get(12)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                yaml_text: row.get(14)?,
                 notes: Vec::new(),
                 attachments: Vec::new(),
                 translations: Vec::new(),
@@ -940,7 +1000,7 @@ fn query_chip_summaries(connection: &Connection) -> Result<Vec<ChipSummary>, Str
     let mut statement = connection
         .prepare(
             "SELECT id, sensor, vendor, family, device_type, category, enabled, builtin,
-                    source_kind, source_name, source_path, source_sha256
+                    source_kind, source_name, source_path, source_sha256, created_at, updated_at
              FROM chips
              ORDER BY category COLLATE NOCASE, sensor COLLATE NOCASE",
         )
@@ -960,6 +1020,8 @@ fn query_chip_summaries(connection: &Connection) -> Result<Vec<ChipSummary>, Str
                 source_name: row.get(9)?,
                 source_path: row.get(10)?,
                 source_sha256: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
                 notes: Vec::new(),
                 attachments: Vec::new(),
                 translations: Vec::new(),
@@ -1039,6 +1101,105 @@ fn load_chip_document_from_database(
     Ok(ChipDocument {
         chip_data,
         translations,
+    })
+}
+
+fn yaml_metadata_text(root: Option<&serde_yaml::Mapping>, name: &str) -> String {
+    root.and_then(|mapping| mapping.get(serde_yaml::Value::String(name.to_owned())))
+        .map(|value| match value {
+            serde_yaml::Value::String(value) => value.clone(),
+            _ => serde_yaml::to_string(value)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        })
+        .unwrap_or_default()
+}
+
+fn chip_source_from_database(
+    connection: &Connection,
+    chip_id: &str,
+) -> Result<(serde_yaml::Value, core_service::SourceMetadata), String> {
+    let (yaml_text, source_sha256, source_name, source_path, created_at, updated_at) = connection
+        .query_row(
+            "SELECT yaml_text, source_sha256, source_name, source_path, created_at, updated_at
+             FROM chips WHERE id = ?1",
+            [chip_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("无法读取芯片来源：{error}"))?
+        .ok_or_else(|| "没有找到该芯片".to_owned())?;
+    let source: serde_yaml::Value =
+        serde_yaml::from_str(&yaml_text).map_err(|error| format!("芯片 YAML 解析失败：{error}"))?;
+    let source_root = source
+        .as_mapping()
+        .and_then(|root| root.get(serde_yaml::Value::String("source".to_owned())))
+        .and_then(serde_yaml::Value::as_mapping);
+    let translation_locales = connection
+        .prepare(
+            "SELECT DISTINCT locale FROM translations WHERE source_sha256 = ?1 ORDER BY locale",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([source_sha256.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| format!("无法读取译文来源：{error}"))?;
+    let source_version = {
+        let version = yaml_metadata_text(source_root, "version");
+        if version.is_empty() {
+            yaml_metadata_text(source_root, "revision")
+        } else {
+            version
+        }
+    };
+    let source_title = yaml_metadata_text(source_root, "title");
+    let source_document = yaml_metadata_text(source_root, "document");
+    Ok((
+        source,
+        core_service::SourceMetadata {
+            source_name,
+            source_path,
+            source_sha256,
+            source_title,
+            source_version,
+            source_document,
+            imported_at: created_at,
+            updated_at,
+            translation_present: !translation_locales.is_empty(),
+            translation_locales,
+        },
+    ))
+}
+
+fn register_details_from_database(
+    connection: &Connection,
+    chip_id: &str,
+    page_name: &str,
+    register_index: usize,
+) -> Result<RegisterDetailsResponse, String> {
+    let (source, source_metadata) = chip_source_from_database(connection, chip_id)?;
+    let register = core_service::get_register(&source, page_name, register_index)
+        .ok_or_else(|| "没有找到该寄存器".to_owned())?;
+    let notes = query_register_notes(connection, Some(chip_id))?
+        .into_iter()
+        .filter(|note| note.page_name == page_name && note.register_name == register.name)
+        .collect();
+    Ok(RegisterDetailsResponse {
+        chip_id: chip_id.to_owned(),
+        register,
+        source: source_metadata,
+        notes,
     })
 }
 
@@ -1538,6 +1699,7 @@ fn launch_path(path: &Path, reveal: bool) -> Result<(), tauri_plugin_opener::Err
     }
 }
 
+#[derive(Clone)]
 struct ParsedImportFile {
     path: PathBuf,
     source_name: String,
@@ -1636,54 +1798,18 @@ fn chip_ids_for_source_hash(
     Ok(chip_ids)
 }
 
-fn import_paths(
-    database: &DatabasePath,
+#[allow(clippy::too_many_arguments)]
+fn import_parsed_files(
+    mut connection: Connection,
     app: &AppHandle,
-    paths: Vec<PathBuf>,
+    parsed: Vec<ParsedImportFile>,
     category: Option<&str>,
     linked: bool,
     operation: &str,
     folder: Option<String>,
+    mut failures: Vec<String>,
+    skipped: usize,
 ) -> Result<ImportReport, String> {
-    let mut connection = open_database(database)?;
-    let total = paths.len();
-    let mut failures = Vec::new();
-    let mut skipped = 0;
-    let mut parsed = Vec::new();
-    for (index, path) in paths.into_iter().enumerate() {
-        let source_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "registers.yaml".to_owned());
-        emit_progress(app, operation, "reading", index + 1, total, &source_name);
-        let fingerprint = file_fingerprint(&path);
-        if linked && linked_path_unchanged(&connection, &path, fingerprint) {
-            skipped += 1;
-            continue;
-        }
-        let yaml_text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) => {
-                failures.push(format!("{}: 读取失败：{error}", path.display()));
-                continue;
-            }
-        };
-        let document = match serde_yaml::from_str::<serde_yaml::Value>(&yaml_text) {
-            Ok(document) => document,
-            Err(error) => {
-                failures.push(format!("{}: YAML 解析失败：{error}", path.display()));
-                continue;
-            }
-        };
-        parsed.push(ParsedImportFile {
-            path,
-            source_name,
-            yaml_text,
-            document,
-            fingerprint,
-        });
-    }
-
     let (source_files, translation_files): (Vec<_>, Vec<_>) = parsed
         .into_iter()
         .partition(|item| !translation::is_translation_document(&item.document));
@@ -1705,7 +1831,7 @@ fn import_paths(
     }
     let mut imported = 0;
     let mut translated = 0;
-    let mut changed_ids = std::collections::HashSet::new();
+    let mut changed_ids = HashSet::new();
     let mut parsed_sources = HashMap::new();
     let work_total = source_files.len() + translation_files.len();
     let mut current = 0;
@@ -1801,6 +1927,341 @@ fn import_paths(
     })
 }
 
+fn import_paths(
+    database: &DatabasePath,
+    app: &AppHandle,
+    paths: Vec<PathBuf>,
+    category: Option<&str>,
+    linked: bool,
+    operation: &str,
+    folder: Option<String>,
+) -> Result<ImportReport, String> {
+    let connection = open_database(database)?;
+    let total = paths.len();
+    let mut failures = Vec::new();
+    let mut skipped = 0;
+    let mut parsed = Vec::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        let source_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "registers.yaml".to_owned());
+        emit_progress(app, operation, "reading", index + 1, total, &source_name);
+        let fingerprint = file_fingerprint(&path);
+        if linked && linked_path_unchanged(&connection, &path, fingerprint) {
+            skipped += 1;
+            continue;
+        }
+        let yaml_text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                failures.push(format!("{}: 读取失败：{error}", path.display()));
+                continue;
+            }
+        };
+        let document = match serde_yaml::from_str::<serde_yaml::Value>(&yaml_text) {
+            Ok(document) => document,
+            Err(error) => {
+                failures.push(format!("{}: YAML 解析失败：{error}", path.display()));
+                continue;
+            }
+        };
+        parsed.push(ParsedImportFile {
+            path,
+            source_name,
+            yaml_text,
+            document,
+            fingerprint,
+        });
+    }
+
+    import_parsed_files(
+        connection, app, parsed, category, linked, operation, folder, failures, skipped,
+    )
+}
+
+fn import_preview_for_paths(
+    database: &DatabasePath,
+    paths: &[PathBuf],
+    category: Option<&str>,
+    linked: bool,
+    operation: &str,
+    folder: Option<String>,
+) -> Result<(ImportPreviewReport, PendingImportBatch), String> {
+    let connection = open_database(database)?;
+    let mut failures = Vec::new();
+    let mut files = Vec::new();
+    let mut fingerprints = Vec::new();
+    let mut parsed = Vec::new();
+    let mut unchanged_paths = HashSet::new();
+    let mut rejected_paths = HashSet::new();
+    for path in paths {
+        let source_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "registers.yaml".to_owned());
+        let fingerprint = file_fingerprint(path);
+        fingerprints.push((path.clone(), fingerprint));
+        let yaml_text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                failures.push(format!("{}: 读取失败：{error}", path.display()));
+                continue;
+            }
+        };
+        let document = match serde_yaml::from_str::<serde_yaml::Value>(&yaml_text) {
+            Ok(document) => document,
+            Err(error) => {
+                failures.push(format!("{}: YAML 解析失败：{error}", path.display()));
+                continue;
+            }
+        };
+        parsed.push(ParsedImportFile {
+            path: path.clone(),
+            source_name,
+            yaml_text,
+            document,
+            fingerprint,
+        });
+    }
+
+    let mut source_contexts = HashMap::new();
+    for item in parsed
+        .iter()
+        .filter(|item| !translation::is_translation_document(&item.document))
+    {
+        let metadata = match parse_metadata_document(&item.yaml_text, &item.document) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failures.push(format!("{}: {error}", item.path.display()));
+                rejected_paths.insert(item.path.clone());
+                files.push(ImportPreviewFile {
+                    source_name: item.source_name.clone(),
+                    kind: "source".to_owned(),
+                    sensor: translation_root_string(&item.document, "sensor"),
+                    status: "rejected".to_owned(),
+                    source_hash_changed: false,
+                    translation_missing: true,
+                    changes: core_service::RegisterComparison::default(),
+                    source_sha256: String::new(),
+                });
+                continue;
+            }
+        };
+        let source_key = if linked {
+            item.path.to_string_lossy().into_owned()
+        } else {
+            format!("{}:{}", item.source_name, metadata.sensor)
+        };
+        let source_kind = if linked { "linked" } else { "imported" };
+        let chip_id = format!("{source_kind}:{:016x}", stable_hash(&source_key));
+        let previous = connection
+            .query_row(
+                "SELECT yaml_text, source_sha256 FROM chips WHERE id = ?1",
+                [chip_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取旧芯片结构：{error}"))?;
+        let source_sha256 = translation::sha256_hex(&item.yaml_text);
+        let changes = if let Some((old_text, _)) = previous.as_ref() {
+            let old = serde_yaml::from_str::<serde_yaml::Value>(old_text)
+                .map_err(|error| format!("旧芯片 YAML 解析失败：{error}"))?;
+            core_service::compare_registers(Some(&old), &item.document)
+        } else {
+            core_service::compare_registers(None, &item.document)
+        };
+        let status = if previous.is_none() {
+            "new"
+        } else if changes == core_service::RegisterComparison::default()
+            && previous.as_ref().map(|item| item.1.as_str()) == Some(source_sha256.as_str())
+        {
+            "unchanged"
+        } else {
+            "update"
+        };
+        if status == "unchanged" {
+            unchanged_paths.insert(item.path.clone());
+        }
+        source_contexts.insert(
+            source_sha256.clone(),
+            (item.yaml_text.clone(), item.document.clone()),
+        );
+        files.push(ImportPreviewFile {
+            source_name: item.source_name.clone(),
+            kind: "source".to_owned(),
+            sensor: metadata.sensor,
+            status: status.to_owned(),
+            source_hash_changed: previous
+                .as_ref()
+                .map(|item| item.1.as_str() != source_sha256)
+                .unwrap_or(true),
+            translation_missing: true,
+            changes,
+            source_sha256,
+        });
+    }
+
+    let mut valid_translation_hashes = HashSet::new();
+    for item in parsed
+        .iter()
+        .filter(|item| translation::is_translation_document(&item.document))
+    {
+        let source_sha256 = item
+            .document
+            .as_mapping()
+            .and_then(|root| root.get(serde_yaml::Value::String("source_sha256".to_owned())))
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let stored_source = if source_contexts.contains_key(&source_sha256) {
+            None
+        } else {
+            connection
+                .query_row(
+                    "SELECT yaml_text FROM chips WHERE source_sha256 = ?1 LIMIT 1",
+                    [source_sha256.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| format!("无法检查译文来源：{error}"))?
+        };
+        let source = if let Some(source) = source_contexts.get(&source_sha256) {
+            Some(source.clone())
+        } else if let Some(source_text) = stored_source {
+            let source_document = serde_yaml::from_str::<serde_yaml::Value>(&source_text)
+                .map_err(|error| format!("英文源 YAML 解析失败：{error}"))?;
+            Some((source_text, source_document))
+        } else {
+            None
+        };
+        let Some((source_text, source_document)) = source else {
+            let error = "找不到与 source_sha256 匹配的英文源 YAML；请在同一批次选择或先导入对应英文寄存器文件";
+            failures.push(format!("{}: {error}", item.path.display()));
+            rejected_paths.insert(item.path.clone());
+            files.push(ImportPreviewFile {
+                source_name: item.source_name.clone(),
+                kind: "translation".to_owned(),
+                sensor: translation_root_string(&item.document, "sensor"),
+                status: "rejected".to_owned(),
+                source_hash_changed: false,
+                translation_missing: true,
+                changes: core_service::RegisterComparison::default(),
+                source_sha256,
+            });
+            continue;
+        };
+        let summary = match translation::validate_translation_yaml(
+            &item.yaml_text,
+            &item.document,
+            &source_text,
+            &source_document,
+        ) {
+            Ok(summary) => summary,
+            Err(error) => {
+                failures.push(format!("{}: {error}", item.path.display()));
+                rejected_paths.insert(item.path.clone());
+                files.push(ImportPreviewFile {
+                    source_name: item.source_name.clone(),
+                    kind: "translation".to_owned(),
+                    sensor: translation_root_string(&item.document, "sensor"),
+                    status: "rejected".to_owned(),
+                    source_hash_changed: false,
+                    translation_missing: true,
+                    changes: core_service::RegisterComparison::default(),
+                    source_sha256,
+                });
+                continue;
+            }
+        };
+        let source_key = if linked {
+            item.path.to_string_lossy().into_owned()
+        } else {
+            format!("imported:{}", summary.source_file)
+        };
+        let previous = connection
+            .query_row(
+                "SELECT yaml_text, source_sha256 FROM translations
+                 WHERE source_key = ?1 AND locale = ?2 LIMIT 1",
+                params![source_key, summary.locale],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("无法读取旧译文：{error}"))?;
+        let status = if previous
+            .as_ref()
+            .is_some_and(|previous| previous.0 == item.yaml_text)
+        {
+            "unchanged"
+        } else if previous.is_some() {
+            "update"
+        } else {
+            "new"
+        };
+        if status == "unchanged" {
+            unchanged_paths.insert(item.path.clone());
+        }
+        valid_translation_hashes.insert(source_sha256.clone());
+        files.push(ImportPreviewFile {
+            source_name: item.source_name.clone(),
+            kind: "translation".to_owned(),
+            sensor: translation_root_string(&item.document, "sensor"),
+            status: status.to_owned(),
+            source_hash_changed: previous
+                .as_ref()
+                .is_some_and(|previous| previous.1 != source_sha256),
+            translation_missing: false,
+            changes: core_service::RegisterComparison::default(),
+            source_sha256,
+        });
+    }
+    for file in files.iter_mut().filter(|file| file.kind == "source") {
+        if file.status == "rejected" {
+            continue;
+        }
+        let stored_translation = connection
+            .query_row(
+                "SELECT 1 FROM translations WHERE source_sha256 = ?1 LIMIT 1",
+                [file.source_sha256.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("无法检查芯片译文：{error}"))?
+            .is_some();
+        file.translation_missing =
+            !stored_translation && !valid_translation_hashes.contains(&file.source_sha256);
+    }
+    let preview_id = format!("preview-{}", stable_hash(&format!("{:?}", paths)));
+    let skipped = unchanged_paths.len();
+    let parsed = parsed
+        .into_iter()
+        .filter(|item| {
+            !unchanged_paths.contains(&item.path) && !rejected_paths.contains(&item.path)
+        })
+        .collect();
+    let pending = PendingImportBatch {
+        parsed,
+        category: category.map(str::to_owned),
+        linked,
+        operation: operation.to_owned(),
+        folder: folder.clone(),
+        fingerprints,
+        failures: failures.clone(),
+        skipped,
+    };
+    Ok((
+        ImportPreviewReport {
+            preview_id,
+            files,
+            failures,
+            folder,
+            canceled: false,
+        },
+        pending,
+    ))
+}
+
 #[tauri::command]
 fn list_chips(database: State<'_, DatabasePath>) -> Result<Vec<ChipRecord>, String> {
     let connection = open_database(&database)?;
@@ -1818,6 +2279,104 @@ fn load_chip_document(
     chip_id: String,
 ) -> Result<ChipDocument, String> {
     load_chip_document_from_database(&open_database(&database)?, chip_id.trim())
+}
+
+#[tauri::command]
+fn get_chip(
+    database: State<'_, DatabasePath>,
+    chip_id: String,
+) -> Result<core_service::ChipDetails, String> {
+    let (source, _) = chip_source_from_database(&open_database(&database)?, chip_id.trim())?;
+    core_service::get_chip(&source).ok_or_else(|| "芯片 YAML 缺少有效页面".to_owned())
+}
+
+#[tauri::command]
+fn get_source_metadata(
+    database: State<'_, DatabasePath>,
+    chip_id: String,
+) -> Result<core_service::SourceMetadata, String> {
+    chip_source_from_database(&open_database(&database)?, chip_id.trim())
+        .map(|(_, metadata)| metadata)
+}
+
+#[tauri::command]
+fn get_register_details(
+    database: State<'_, DatabasePath>,
+    chip_id: String,
+    page_name: String,
+    register_index: usize,
+) -> Result<RegisterDetailsResponse, String> {
+    register_details_from_database(
+        &open_database(&database)?,
+        chip_id.trim(),
+        page_name.trim(),
+        register_index,
+    )
+}
+
+#[tauri::command]
+fn get_field(
+    database: State<'_, DatabasePath>,
+    chip_id: String,
+    page_name: String,
+    register_index: usize,
+    field_name: String,
+    bits: Option<String>,
+) -> Result<core_service::FieldDetails, String> {
+    let details = register_details_from_database(
+        &open_database(&database)?,
+        chip_id.trim(),
+        page_name.trim(),
+        register_index,
+    )?;
+    core_service::get_field(&details.register, field_name.trim(), bits.as_deref())
+        .cloned()
+        .ok_or_else(|| "没有找到该位域".to_owned())
+}
+
+fn parse_register_value(value: &str) -> Result<u128, String> {
+    let compact = value.trim().replace('_', "");
+    if compact.is_empty() {
+        return Err("寄存器测试值不能为空".to_owned());
+    }
+    let (digits, radix) = if let Some(value) = compact.strip_prefix("0x") {
+        (value, 16)
+    } else if let Some(value) = compact.strip_prefix("0X") {
+        (value, 16)
+    } else if let Some(value) = compact.strip_prefix("0b") {
+        (value, 2)
+    } else if let Some(value) = compact.strip_prefix("0B") {
+        (value, 2)
+    } else {
+        (compact.as_str(), 10)
+    };
+    if digits.is_empty() {
+        return Err("寄存器测试值缺少数字".to_owned());
+    }
+    u128::from_str_radix(digits, radix).map_err(|_| "寄存器测试值不是有效的无符号整数".to_owned())
+}
+
+#[tauri::command]
+fn decode_register_value(
+    database: State<'_, DatabasePath>,
+    chip_id: String,
+    page_name: String,
+    register_index: usize,
+    value: String,
+) -> Result<core_service::DecodedRegisterValue, String> {
+    let connection = open_database(&database)?;
+    let details = register_details_from_database(
+        &connection,
+        chip_id.trim(),
+        page_name.trim(),
+        register_index,
+    )?;
+    let value = parse_register_value(&value)?;
+    Ok(core_service::decode_register_value(
+        value,
+        details.register.bit_width,
+        &details.register.fields,
+    ))
 }
 
 #[tauri::command]
@@ -1882,6 +2441,48 @@ async fn import_yaml_files(
 }
 
 #[tauri::command]
+async fn preview_yaml_files(
+    database: State<'_, DatabasePath>,
+    pending_imports: State<'_, PendingImports>,
+    category: Option<String>,
+) -> Result<ImportPreviewReport, String> {
+    let Some(paths) = rfd::FileDialog::new()
+        .add_filter("YAML", &["yaml", "yml"])
+        .pick_files()
+    else {
+        return Ok(ImportPreviewReport {
+            preview_id: String::new(),
+            files: Vec::new(),
+            failures: Vec::new(),
+            folder: None,
+            canceled: true,
+        });
+    };
+    let database = database.inner().clone();
+    let category_for_preview = category.clone();
+    let (mut report, batch) = tauri::async_runtime::spawn_blocking(move || {
+        import_preview_for_paths(
+            &database,
+            &paths,
+            category_for_preview.as_deref(),
+            false,
+            "import",
+            None,
+        )
+    })
+    .await
+    .map_err(|error| format!("导入预览任务异常结束：{error}"))??;
+    let sequence = pending_imports.counter.fetch_add(1, Ordering::Relaxed);
+    report.preview_id = format!("{}-{sequence}", report.preview_id);
+    pending_imports
+        .batches
+        .lock()
+        .map_err(|_| "导入预览状态不可用".to_owned())?
+        .insert(report.preview_id.clone(), batch);
+    Ok(report)
+}
+
+#[tauri::command]
 async fn import_yaml_directory(
     app: AppHandle,
     database: State<'_, DatabasePath>,
@@ -1914,6 +2515,100 @@ async fn import_yaml_directory(
     })
     .await
     .map_err(|error| format!("目录导入任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn preview_yaml_directory(
+    database: State<'_, DatabasePath>,
+    pending_imports: State<'_, PendingImports>,
+    category: Option<String>,
+) -> Result<ImportPreviewReport, String> {
+    let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+        return Ok(ImportPreviewReport {
+            preview_id: String::new(),
+            files: Vec::new(),
+            failures: Vec::new(),
+            folder: None,
+            canceled: true,
+        });
+    };
+    let folder_label = folder.to_string_lossy().into_owned();
+    let paths = yaml_paths_in_folder(&folder);
+    let database = database.inner().clone();
+    let category_for_preview = category.clone();
+    let folder_for_preview = folder_label.clone();
+    let (mut report, batch) = tauri::async_runtime::spawn_blocking(move || {
+        import_preview_for_paths(
+            &database,
+            &paths,
+            category_for_preview.as_deref(),
+            true,
+            "directory-import",
+            Some(folder_for_preview),
+        )
+    })
+    .await
+    .map_err(|error| format!("目录预览任务异常结束：{error}"))??;
+    let sequence = pending_imports.counter.fetch_add(1, Ordering::Relaxed);
+    report.preview_id = format!("{}-{sequence}", report.preview_id);
+    pending_imports
+        .batches
+        .lock()
+        .map_err(|_| "导入预览状态不可用".to_owned())?
+        .insert(report.preview_id.clone(), batch);
+    Ok(report)
+}
+
+#[tauri::command]
+async fn confirm_yaml_import_preview(
+    app: AppHandle,
+    database: State<'_, DatabasePath>,
+    pending_imports: State<'_, PendingImports>,
+    preview_id: String,
+) -> Result<ImportReport, String> {
+    let batch = pending_imports
+        .batches
+        .lock()
+        .map_err(|_| "导入预览状态不可用".to_owned())?
+        .remove(preview_id.trim())
+        .ok_or_else(|| "导入预览已过期，请重新选择文件".to_owned())?;
+    if batch
+        .fingerprints
+        .iter()
+        .any(|(path, fingerprint)| file_fingerprint(path) != *fingerprint)
+    {
+        return Err("文件在预览后发生变化，请重新预览后再导入".to_owned());
+    }
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = open_database(&database)?;
+        import_parsed_files(
+            connection,
+            &app,
+            batch.parsed,
+            batch.category.as_deref(),
+            batch.linked,
+            &batch.operation,
+            batch.folder,
+            batch.failures,
+            batch.skipped,
+        )
+    })
+    .await
+    .map_err(|error| format!("导入任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+fn cancel_yaml_import_preview(
+    pending_imports: State<'_, PendingImports>,
+    preview_id: String,
+) -> Result<(), String> {
+    pending_imports
+        .batches
+        .lock()
+        .map_err(|_| "导入预览状态不可用".to_owned())?
+        .remove(preview_id.trim());
+    Ok(())
 }
 
 #[tauri::command]
@@ -2265,10 +2960,7 @@ fn delete_chip(database: State<'_, DatabasePath>, chip_id: String) -> Result<(),
         )
         .map_err(|error| format!("无法删除芯片搜索索引：{error}"))?;
     transaction
-        .execute(
-            "DELETE FROM chips WHERE id = ?1",
-            params![chip_id],
-        )
+        .execute("DELETE FROM chips WHERE id = ?1", params![chip_id])
         .map_err(|error| format!("无法删除芯片：{error}"))?;
     transaction
         .commit()
@@ -2493,16 +3185,26 @@ pub fn run() {
             let database = DatabasePath(app_data.join("register-library.sqlite3"));
             initialize_database(&database)?;
             app.manage(database);
+            app.manage(PendingImports::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_chips,
             list_chip_summaries,
             load_chip_document,
+            get_chip,
+            get_register_details,
+            get_field,
+            get_source_metadata,
+            decode_register_value,
             import_yaml,
             import_yaml_files,
+            preview_yaml_files,
             import_translation,
             import_yaml_directory,
+            preview_yaml_directory,
+            confirm_yaml_import_preview,
+            cancel_yaml_import_preview,
             refresh_linked_library,
             search_index_status,
             rebuild_search_index,
@@ -3353,6 +4055,135 @@ translations:
     }
 
     #[test]
+    fn previews_identical_import_without_writing_or_losing_notes() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let connection = open_database(&database).unwrap();
+        let chip_id = import_test_chip(&connection);
+        let notes = upsert_register_note(
+            &connection,
+            &RegisterNoteInput {
+                note_id: None,
+                chip_id: chip_id.clone(),
+                page_name: "MMIO".to_owned(),
+                register_addr: Some(0xC100),
+                register_key: "mmio:49408:USB3OTG_GSBUSCFG0".to_owned(),
+                register_name: "USB3OTG_GSBUSCFG0".to_owned(),
+                kind: "note".to_owned(),
+                content: "preview must not change this note".to_owned(),
+            },
+        )
+        .unwrap();
+        drop(connection);
+
+        let folder = std::env::temp_dir().join(format!(
+            "register-reference-preview-{}-{}",
+            std::process::id(),
+            DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let source_path = folder.join("dwc3_rk3588.yaml");
+        fs::write(&source_path, TEST_CHIP_YAML).unwrap();
+        let (report, pending) = import_preview_for_paths(
+            &database,
+            std::slice::from_ref(&source_path),
+            None,
+            false,
+            "test-preview",
+            None,
+        )
+        .unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].status, "unchanged");
+        assert_eq!(
+            report.files[0].changes,
+            core_service::RegisterComparison::default()
+        );
+        assert_eq!(pending.skipped, 1);
+        assert!(pending.parsed.is_empty());
+        assert!(pending.failures.is_empty());
+
+        let connection = open_database(&database).unwrap();
+        assert_eq!(query_chips(&connection).unwrap().len(), 1);
+        let notes_after_preview = query_register_notes(&connection, Some(&chip_id)).unwrap();
+        assert_eq!(notes_after_preview.len(), notes.len());
+        assert_eq!(notes_after_preview[0].id, notes[0].id);
+        assert_eq!(notes_after_preview[0].content, notes[0].content);
+        drop(connection);
+        let _ = fs::remove_dir_all(folder);
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
+    fn preview_accepts_a_source_and_its_translation_in_the_same_batch() {
+        let database = temporary_database();
+        initialize_database(&database).unwrap();
+        let folder = std::env::temp_dir().join(format!(
+            "register-reference-preview-batch-{}-{}",
+            std::process::id(),
+            DATABASE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let source_path = folder.join("dwc3_rk3588.yaml");
+        let translation_path = folder.join("dwc3_rk3588.zh-CN.yaml");
+        fs::write(&source_path, TEST_CHIP_YAML).unwrap();
+        let source_sha256 = translation::sha256_hex(TEST_CHIP_YAML);
+        let sidecar = format!(
+            r#"translation_schema_version: 1
+format: "register-reference-translation"
+source_locale: "en"
+locale: "zh-CN"
+source_file: "controllers/usb/rockchip/rk3588-dwc3.yaml"
+source_sha256: "{source_sha256}"
+metadata:
+  status: "draft"
+  coverage: "partial"
+  method: "human"
+  translator: "preview test"
+  updated: "2026-08-19"
+translations:
+  pages:
+    - name: "MMIO"
+      registers:
+        - name: "USB3OTG_GSBUSCFG0"
+          desc: "总线配置寄存器"
+"#
+        );
+        fs::write(&translation_path, sidecar).unwrap();
+
+        let (report, pending) = import_preview_for_paths(
+            &database,
+            &[source_path, translation_path],
+            None,
+            false,
+            "test-preview",
+            None,
+        )
+        .unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.files.len(), 2);
+        assert!(report.files.iter().all(|file| file.status == "new"));
+        assert_eq!(pending.parsed.len(), 2);
+        assert_eq!(pending.skipped, 0);
+        assert!(pending.failures.is_empty());
+        assert!(
+            !report
+                .files
+                .iter()
+                .find(|file| file.kind == "source")
+                .unwrap()
+                .translation_missing
+        );
+        assert!(query_chips(&open_database(&database).unwrap())
+            .unwrap()
+            .is_empty());
+
+        let _ = fs::remove_dir_all(folder);
+        let _ = fs::remove_file(database.0);
+    }
+
+    #[test]
     fn rejects_invalid_yaml_without_writing_it_to_the_library() {
         let database = temporary_database();
         initialize_database(&database).unwrap();
@@ -3388,6 +4219,29 @@ pages:
         assert!(error.contains("YAML 规范校验未通过"));
         assert!(error.contains("超出寄存器有效位宽"));
         assert_eq!(query_chips(&connection).unwrap().len(), before);
+        drop(connection);
+
+        let invalid_path = database.0.with_extension("invalid.yaml");
+        fs::write(&invalid_path, invalid_yaml).unwrap();
+        let (preview, pending) = import_preview_for_paths(
+            &database,
+            std::slice::from_ref(&invalid_path),
+            None,
+            false,
+            "test-preview",
+            None,
+        )
+        .unwrap();
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].status, "rejected");
+        assert_eq!(preview.failures.len(), 1);
+        assert_eq!(pending.failures, preview.failures);
+        assert!(pending.parsed.is_empty());
+        assert_eq!(pending.skipped, 0);
+        assert!(query_chips(&open_database(&database).unwrap())
+            .unwrap()
+            .is_empty());
+        let _ = fs::remove_file(invalid_path);
         let _ = fs::remove_file(database.0);
     }
 

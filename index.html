@@ -517,6 +517,23 @@
           <button id="importResultConfirmButton" class="primary-button" type="button">知道了</button>
         </footer>
       </dialog>
+
+      <dialog id="importPreviewDialog" class="import-preview-dialog" aria-labelledby="importPreviewTitle">
+        <header>
+          <div>
+            <h2 id="importPreviewTitle">导入预览</h2>
+            <p id="importPreviewSummary"></p>
+          </div>
+          <button id="importPreviewCancelButton" class="icon-button close-button" type="button" title="取消导入" aria-label="取消导入">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <pre id="importPreviewDetails" tabindex="0"></pre>
+        <footer>
+          <button id="importPreviewCancelAction" class="secondary-button" type="button">取消</button>
+          <button id="importPreviewConfirmButton" class="primary-button" type="button">确认导入</button>
+        </footer>
+      </dialog>
     </div>
 
     <script src="data/chips.data.js"></script>

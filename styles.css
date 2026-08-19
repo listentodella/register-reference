@@ -1906,6 +1906,129 @@ main {
   line-height: 1.25;
 }
 
+.detail-workbench .register-block {
+  margin-bottom: 14px;
+}
+
+.detail-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-toolbar strong {
+  min-width: 0;
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+
+.detail-copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  padding: 0 8px;
+  background: var(--control-bg);
+  color: var(--subtle-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.detail-copy-button:hover,
+.detail-copy-button:focus-visible,
+.detail-copy-button.copied {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  outline: none;
+}
+
+.detail-copy-button.copy-failed {
+  border-color: var(--red-border);
+  background: var(--red-soft);
+  color: var(--red-ink);
+}
+
+.detail-copy-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.detail-source {
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+}
+
+.detail-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.detail-source-head h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.detail-fact-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.detail-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.detail-source-grid div {
+  min-width: 0;
+}
+
+.detail-source-grid dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.detail-source-grid dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.detail-source-grid code {
+  font-size: 10px;
+}
+
+.detail-user-notes {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--amber-ink);
+  font-size: 12px;
+}
+
+.detail-user-notes.empty {
+  color: var(--muted);
+}
+
 .register-heading {
   display: flex;
   align-items: flex-start;
@@ -4288,6 +4411,62 @@ main {
   box-shadow: var(--dialog-shadow);
 }
 
+.import-preview-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: var(--dialog-shadow);
+}
+
+.import-preview-dialog::backdrop {
+  background: var(--dialog-backdrop);
+}
+
+.import-preview-dialog header,
+.import-preview-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+}
+
+.import-preview-dialog header {
+  border-bottom: 1px solid var(--line);
+}
+
+.import-preview-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.import-preview-dialog p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.import-preview-dialog pre {
+  max-height: min(520px, calc(100vh - 240px));
+  margin: 0;
+  padding: 18px 20px;
+  overflow: auto;
+  color: var(--text);
+  background: var(--panel-soft);
+  font: 12px/1.65 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.import-preview-dialog footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+}
+
 .import-result-dialog::backdrop {
   background: var(--dialog-backdrop);
 }
@@ -4476,6 +4655,40 @@ main {
   .search-result-meta {
     flex-wrap: wrap;
     white-space: normal;
+  }
+
+  .detail-toolbar {
+    align-items: stretch;
+  }
+
+  .detail-toolbar strong {
+    flex-basis: 100%;
+  }
+
+  .detail-copy-button {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .detail-source-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .import-preview-dialog,
+  .import-result-dialog {
+    width: calc(100vw - 20px);
+  }
+
+  .import-preview-dialog header,
+  .import-preview-dialog footer,
+  .import-result-dialog header,
+  .import-result-dialog footer {
+    padding: 14px;
+  }
+
+  .import-preview-dialog pre,
+  .import-result-dialog pre {
+    padding: 14px;
   }
 
   .section-head {

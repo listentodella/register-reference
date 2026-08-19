@@ -36,6 +36,13 @@ try {
         : Boolean(panel && !panel.hidden && document.querySelector(".search-result"));
     });
   };
+  const importYamlFile = async (file) => {
+    await page.locator("#yamlFileInput").setInputFiles(file);
+    await page.waitForSelector("#importPreviewDialog[open]");
+    assert.match(await page.locator("#importPreviewSummary").innerText(), /确认后写入芯片库/);
+    await page.locator("#importPreviewConfirmButton").click();
+    await page.locator("#importPreviewDialog").waitFor({ state: "hidden" });
+  };
 
   await page.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
   assert.equal(await page.locator("#chipSelect option").count(), 1, "the clean library should have only its empty placeholder");
@@ -43,12 +50,23 @@ try {
   assert.equal(await page.locator("#pageSelect option:checked").innerText(), "尚未选择页面");
   assert.match(await page.locator("#statusBand").innerText(), /请选择 YAML 文件或目录/);
   assert.match(await page.locator("#languageSwitcher").getAttribute("title"), /导入芯片后/);
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "dwc3_rk3588.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(dwc3Yaml),
   });
   await page.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "RK3588_DWC3");
+  const importedChipCount = await page.locator("#chipSelect option").count();
+  await page.locator("#yamlFileInput").setInputFiles({
+    name: "dwc3_rk3588.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(dwc3Yaml),
+  });
+  await page.waitForSelector("#importPreviewDialog[open]");
+  assert.match(await page.locator("#importPreviewDetails").innerText(), /无结构变化/);
+  await page.locator("#importPreviewCancelAction").click();
+  await page.locator("#importPreviewDialog").waitFor({ state: "hidden" });
+  assert.equal(await page.locator("#chipSelect option").count(), importedChipCount, "canceling a preview must not change the library");
   const toolbarLayout = await page.evaluate(() => ({
     pageWidth: document.documentElement.scrollWidth,
     languageWidth: document.getElementById("languageControl").getBoundingClientRect().width,
@@ -338,7 +356,7 @@ try {
   assert.equal(await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(28, 29, 31)");
   await page.reload({ waitUntil: "load" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "rusty");
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "dwc3_rk3588.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(dwc3Yaml),
@@ -430,7 +448,7 @@ pages:
             bits: "8"
             desc: "Negative condition flag. Set to 1 if the result of the last flag-setting instruction was negative."
 `;
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "arm-ui-test.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(systemRegisterYaml),
@@ -470,7 +488,7 @@ translations:
                 - value: "0b1010xxxx"
                   desc: "高半字节为 A"
 `;
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "arm-ui-test.zh-CN.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(systemTranslationYaml),
@@ -620,7 +638,7 @@ pages:
             reset: 0
             desc: "Machine interrupt enable"
 `;
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "riscv-rv64-ui-test.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(riscvRegisterYaml),
@@ -767,7 +785,7 @@ pages:
               scheme: "aarch32_special"
               selector: "APSR"
 `;
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "arm-a32-ui-test.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(aarch32RegisterYaml),
@@ -839,7 +857,7 @@ ${mProfileBulkRegisters}
         bit_width: 32
         desc: "CPUID Base Register"
 `;
-  await page.locator("#yamlFileInput").setInputFiles({
+  await importYamlFile({
     name: "arm-m-ui-test.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(mProfileRegisterYaml),
@@ -979,13 +997,26 @@ ${mProfileBulkRegisters}
   await waitForSearch();
   await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_GSBUSCFG0" }).first().click();
   await page.waitForSelector("#registerTableBody tr.is-target");
+  await page.waitForSelector("#hoverPanel .detail-workbench");
+  assert.match(await page.locator("#hoverPanel .detail-toolbar").innerText(), /USB3OTG_GSBUSCFG0/);
+  assert.match(await page.locator("#hoverPanel .detail-source").innerText(), /dwc3_rk3588\.yaml[\s\S]*来源文档[\s\S]*哈希/);
+  assert.match(await page.locator("#hoverPanel .detail-source").innerText(), /完整性未声明[\s\S]*无已标记的推断或未匹配位域/);
+  assert.ok(await page.locator("#hoverPanel .note-edit-button").count() <= 1, "the detail workbench must not duplicate the note action");
   const dataEndianField = page.locator("#registerTableBody .field-row").filter({ hasText: "datbigend" });
   assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Little-endian \(default\)/);
   assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b0/);
-  await page.getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000801");
+  await page.locator("#hoverPanel").getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000801");
   assert.match(await dataEndianField.locator(".field-meaning").innerText(), /Big-endian/);
   assert.match(await dataEndianField.locator(".enum-chip.active").innerText(), /1'b1/);
-  await page.getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000001");
+  assert.match(await page.locator("#hoverPanel .field-row").filter({ hasText: "datbigend" }).innerText(), /0x1 \/ 1[\s\S]*Big-endian/);
+  await page.locator("#hoverPanel").getByRole("textbox", { name: "USB3OTG_GSBUSCFG0 的寄存器值" }).fill("0x00000001");
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => {
+    const panel = document.querySelector("#hoverPanel");
+    const rect = panel.getBoundingClientRect();
+    return document.documentElement.scrollWidth <= window.innerWidth && rect.left >= 0 && rect.right <= window.innerWidth;
+  }), true, "the detail workbench should fit a narrow viewport");
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator("#searchInput").fill("USB3OTG_GSBUSCFG1");
   await waitForSearch();
   await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_GSBUSCFG1" }).first().click();
@@ -997,12 +1028,10 @@ ${mProfileBulkRegisters}
   await waitForSearch();
   await page.locator(".search-result[data-kind='register']").filter({ hasText: "USB3OTG_DGCMD" }).first().click();
   await page.waitForSelector("#registerTableBody tr.is-target");
-  const commandInput = page.getByRole("textbox", { name: "USB3OTG_DGCMD 的寄存器值" });
+  await page.waitForSelector("#hoverPanel .detail-workbench");
+  const commandInput = page.locator("#hoverPanel").getByRole("textbox", { name: "USB3OTG_DGCMD 的寄存器值" });
   await commandInput.fill("0x00000008");
-  const commandTypeField = page.locator("#registerTableBody tr")
-    .filter({ has: commandInput })
-    .locator(".field-row")
-    .filter({ hasText: "cmdtyp" });
+  const commandTypeField = page.locator("#hoverPanel .field-row").filter({ hasText: "cmdtyp" });
   assert.match(await commandTypeField.locator(".field-meaning").innerText(), /Start New Configuration/);
   assert.match(await commandTypeField.locator(".enum-chip.active").innerText(), /8'h8/);
   await page.locator("#searchInput").fill("");
@@ -1128,7 +1157,7 @@ pages:
             desc: "temperature data"
 `;
 
-  await page.setInputFiles("#yamlFileInput", {
+  await importYamlFile({
     name: "test64.yaml",
     mimeType: "application/yaml",
     buffer: Buffer.from(yaml64),

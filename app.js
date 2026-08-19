@@ -37,6 +37,7 @@
     searchHistoryDraft: "",
     registerValues: new Map(),
     activeHoverAddress: null,
+    activeWorkbenchKey: "",
     loadMessage: "",
     libraryQuery: "",
     libraryOpen: false,
@@ -44,6 +45,9 @@
     libraryStatusError: false,
     librarySelection: new Set(),
     libraryRemovalIds: [],
+    importPreviewId: "",
+    importPreviewLabel: "",
+    importPreviewResolver: null,
     noteRegisterKey: null,
     editingNoteId: null,
     noteKind: "note",
@@ -129,6 +133,13 @@
     tableBody: document.getElementById("registerTableBody"),
     registerLocatorHeader: document.getElementById("registerLocatorHeader"),
     hoverPanel: document.getElementById("hoverPanel"),
+    importPreviewDialog: document.getElementById("importPreviewDialog"),
+    importPreviewTitle: document.getElementById("importPreviewTitle"),
+    importPreviewSummary: document.getElementById("importPreviewSummary"),
+    importPreviewDetails: document.getElementById("importPreviewDetails"),
+    importPreviewCancelButton: document.getElementById("importPreviewCancelButton"),
+    importPreviewCancelAction: document.getElementById("importPreviewCancelAction"),
+    importPreviewConfirmButton: document.getElementById("importPreviewConfirmButton"),
     libraryBackdrop: document.getElementById("libraryBackdrop"),
     libraryPanel: document.getElementById("libraryPanel"),
     libraryCloseButton: document.getElementById("libraryCloseButton"),
@@ -1140,14 +1151,14 @@
   }
 
   function revealSearchTarget(result, { focus = false } = {}) {
-    if (!result?.registerName && !Number.isInteger(result?.registerIndex)) return;
+    if (!result?.registerName && !Number.isInteger(result?.registerIndex)) return null;
     const sourceRegisters = getPages(getChip())?.[result.pageName]?.registers || [];
     const source = Number.isInteger(result.registerIndex) ? sourceRegisters[result.registerIndex] : null;
     const displayed = getDisplayRegisters().find((register) =>
       register._sourceRegisterIndex === result.registerIndex
       || (register.name === result.registerName && (!source || Number(register.addr) === Number(source.addr))),
     );
-    if (!displayed) return;
+    if (!displayed) return null;
     const key = getRegisterKey(displayed);
     const row = Array.from(els.tableBody.querySelectorAll(".register-display"))
       .find((item) => item.dataset.registerKey === key);
@@ -1168,6 +1179,157 @@
     target.scrollIntoView({ block: "center" });
     if (focus) row.focus({ preventScroll: true });
     window.setTimeout(() => row.classList.remove("is-target"), 1800);
+    return row;
+  }
+
+  function getRegisterForSearchResult(result) {
+    const sourceRegisters = getPages(getChip())?.[result?.pageName]?.registers || [];
+    const source = Number.isInteger(result?.registerIndex) ? sourceRegisters[result.registerIndex] : null;
+    return getDisplayRegisters().find((register) =>
+      register._sourceRegisterIndex === result?.registerIndex
+      || (register.name === result?.registerName && (!source || Number(register.addr) === Number(source.addr))),
+    ) || source;
+  }
+
+  function detailSourceForCurrentChip() {
+    const chip = getChip() || {};
+    const record = libraryRecords.find((item) => item.id === (chip._libraryId || chip._id));
+    const translations = record?.translations || chip._translations || [];
+    return {
+      sourceName: record?.sourceName || chip._source || "",
+      sourcePath: record?.sourcePath || null,
+      sourceSha256: record?.sourceSha256 || chip._sourceSha256 || "",
+      sourceTitle: chip.source?.title || "",
+      sourceVersion: chip.source?.version || chip.source?.revision || "",
+      sourceDocument: chip.source?.document || chip.source?.title || "",
+      importedAt: record?.createdAt || "",
+      updatedAt: record?.updatedAt || "",
+      translationPresent: translations.length > 0,
+      translationLocales: translations.map((item) => item.locale).filter(Boolean),
+    };
+  }
+
+  function detailCopyText(reg, kind) {
+    if (kind === "name") return reg.name || "";
+    if (kind === "locator") return formatRange(reg);
+    const value = getRegisterValue(reg);
+    const bitWidth = getBitWidth(reg);
+    const type = bitWidth <= 8 ? "uint8_t" : bitWidth <= 16 ? "uint16_t" : bitWidth <= 32 ? "uint32_t" : bitWidth <= 64 ? "uint64_t" : "unsigned __int128";
+    const suffix = bitWidth <= 32 ? "U" : bitWidth <= 64 ? "ULL" : "";
+    const fields = (reg.fields || []).map((field) => {
+      const fieldValue = value.ok ? extractFieldValue(value.value, field) : 0n;
+      return `${field.name || "FIELD"}=${formatBigIntHex(fieldValue, parseBits(field.bits).width)}`;
+    }).join(", ");
+    const variable = String(reg.name || "register").replace(/[^0-9A-Za-z_]/g, "_").toLowerCase();
+    return `${type} ${variable} = ${value.ok ? formatBigIntHex(value.value, bitWidth) : "0x0"}${suffix};${fields ? ` /* ${fields} */` : ""}`;
+  }
+
+  async function copyDetailValue(reg, kind, button) {
+    const value = detailCopyText(reg, kind);
+    const label = button.querySelector("span");
+    const idleText = kind === "name" ? "复制名称" : kind === "locator" ? "复制地址/编码" : "复制初始化";
+    try {
+      await navigator.clipboard.writeText(value);
+      button.classList.add("copied");
+      label?.replaceChildren(document.createTextNode("已复制"));
+      window.setTimeout(() => {
+        button.classList.remove("copied");
+        label?.replaceChildren(document.createTextNode(idleText));
+      }, 1200);
+    } catch (_error) {
+      button.classList.add("copy-failed");
+      label?.replaceChildren(document.createTextNode("复制失败"));
+      button.title = "当前环境不允许写入剪贴板";
+      window.setTimeout(() => {
+        button.classList.remove("copy-failed");
+        label?.replaceChildren(document.createTextNode(idleText));
+        button.removeAttribute("title");
+      }, 1800);
+    }
+  }
+
+  function renderDetailSource(source, reg, notes) {
+    const fields = reg.fields || [];
+    const enumFields = fields.map((field) => ({ field, entries: getFieldEnumEntries(field) })).filter((item) => item.entries.length);
+    const enumCount = enumFields.reduce((count, item) => count + item.entries.length, 0);
+    const inferredFields = fields.filter((field) => field.inferred === true || field._inferred === true || String(field.provenance || "").toLowerCase() === "inferred");
+    const unmatchedFields = fields.filter((field) => !field.name || field.bits === undefined || field.bits === null || field._unmatched === true);
+    const translationLabel = source.translationPresent
+      ? `已有${source.translationLocales?.length ? `（${source.translationLocales.join(", ")}）` : ""}`
+      : "未导入";
+    const enumLabel = enumCount
+      ? `${enumCount} 项，分布于 ${enumFields.length}/${fields.length} 个位域；完整性未声明`
+      : "未定义；完整性未声明";
+    const inferenceLabel = inferredFields.length || unmatchedFields.length
+      ? `推断 ${inferredFields.length} 个，未匹配 ${unmatchedFields.length} 个`
+      : "无已标记的推断或未匹配位域";
+    const hash = source.sourceSha256 || "";
+    const hashLabel = hash.length > 18 ? `${hash.slice(0, 12)}...${hash.slice(-6)}` : hash || "未记录";
+    return `
+      <section class="detail-source" aria-label="数据可信度">
+        <div class="detail-source-head"><h4>来源与可信度</h4><span class="detail-fact-label">事实来源</span></div>
+        <dl class="detail-source-grid">
+          <div><dt>文件</dt><dd>${escapeHtml(source.sourceName || "未知")}</dd></div>
+          ${source.sourcePath ? `<div><dt>路径</dt><dd title="${escapeHtml(source.sourcePath)}">${escapeHtml(source.sourcePath)}</dd></div>` : ""}
+          <div><dt>来源文档</dt><dd>${escapeHtml(source.sourceTitle || source.sourceDocument || "未声明")}</dd></div>
+          <div><dt>哈希</dt><dd><code title="${escapeHtml(hash)}">${escapeHtml(hashLabel)}</code></dd></div>
+          <div><dt>版本</dt><dd>${escapeHtml(source.sourceVersion || "未声明")}</dd></div>
+          <div><dt>中文译文</dt><dd>${escapeHtml(translationLabel)}</dd></div>
+          <div><dt>枚举</dt><dd>${escapeHtml(enumLabel)}</dd></div>
+          <div><dt>推断/未匹配</dt><dd>${escapeHtml(inferenceLabel)}</dd></div>
+          <div><dt>导入时间</dt><dd>${escapeHtml(formatNoteTime(source.importedAt) || "未记录")}</dd></div>
+          <div><dt>更新检查</dt><dd>${escapeHtml(formatNoteTime(source.updatedAt) || "未记录")}</dd></div>
+        </dl>
+        ${notes.length ? `<div class="detail-user-notes"><strong>用户备注</strong><span>${notes.length} 条，已与事实来源分开保存</span></div>` : `<div class="detail-user-notes empty"><strong>用户备注</strong><span>暂无备注</span></div>`}
+      </section>
+    `;
+  }
+
+  async function showRegisterWorkbench(result, anchor) {
+    const reg = getRegisterForSearchResult(result);
+    if (!reg) return;
+    state.activeHoverAddress = null;
+    state.activeWorkbenchKey = getRegisterKey(reg);
+    let source = detailSourceForCurrentChip();
+    if (isDesktopApp() && Number.isInteger(result.registerIndex)) {
+      try {
+        const response = await getInvoke()("get_register_details", {
+          chipId: result.chipId,
+          pageName: result.pageName || "",
+          registerIndex: result.registerIndex,
+        });
+        source = response.source || source;
+      } catch (_error) {
+        // The local register remains useful when running against an older desktop build.
+      }
+    }
+    if (state.activeWorkbenchKey !== getRegisterKey(reg)) return;
+    const notes = getRegisterNotes(reg);
+    els.hoverPanel.innerHTML = `
+      <div class="hover-panel-caret" aria-hidden="true"></div>
+      <div class="hover-panel-body detail-workbench">
+        <div class="hover-panel-bar">
+          <div class="hover-panel-actions">
+            <button class="hover-close close-button" type="button" title="关闭详情" aria-label="关闭详情窗口"><i data-lucide="x"></i></button>
+            ${renderNoteEditButton(reg)}
+          </div>
+          <span>寄存器详情工作台</span>
+        </div>
+        <div class="detail-toolbar" role="toolbar" aria-label="寄存器复制操作">
+          <strong>${escapeHtml(reg.name || "寄存器")}</strong>
+          <button class="detail-copy-button" type="button" data-detail-copy="name"><i data-lucide="copy"></i><span>复制名称</span></button>
+          <button class="detail-copy-button" type="button" data-detail-copy="locator"><i data-lucide="copy"></i><span>复制地址/编码</span></button>
+          <button class="detail-copy-button" type="button" data-detail-copy="initializer"><i data-lucide="copy"></i><span>复制初始化</span></button>
+        </div>
+        ${renderRegisterBlock(reg, false, { showNoteButton: false })}
+        ${renderDetailSource(source, reg, notes)}
+      </div>
+    `;
+    refreshIcons(els.hoverPanel);
+    els.hoverPanel.hidden = false;
+    els.hoverPanel.setAttribute("tabindex", "-1");
+    syncOpenCellHighlight();
+    positionDetailPanel(anchor || getOpenRegisterCell());
   }
 
   async function openSearchResult(result, { focus = false } = {}) {
@@ -1213,7 +1375,13 @@
     render();
     window.requestAnimationFrame(() => {
       if (result.kind === "chip") window.scrollTo({ top: 0, behavior: "auto" });
-      else revealSearchTarget(result, { focus });
+      else {
+        const row = revealSearchTarget(result, { focus });
+        showRegisterWorkbench(result, row).catch((error) => {
+          state.loadMessage = `详情加载失败：${errorMessage(error)}`;
+          render();
+        });
+      }
     });
   }
 
@@ -3147,7 +3315,7 @@
       .join("");
   }
 
-  function renderRegisterBlock(reg, compact = false) {
+  function renderRegisterBlock(reg, compact = false, { showNoteButton = true } = {}) {
     const valueInfo = getRegisterValue(reg);
     const key = getRegisterKey(reg);
     const registerTranslation = getRegisterTranslation(reg);
@@ -3155,7 +3323,7 @@
       <div class="register-block register-display" data-register-key="${escapeHtml(key)}">
         <div class="register-heading">
           <h3>${escapeHtml(reg.name)} <span class="addr-cell">${escapeHtml(formatRange(reg))}</span></h3>
-          ${compact ? "" : renderNoteEditButton(reg)}
+          ${compact || !showNoteButton ? "" : renderNoteEditButton(reg)}
         </div>
         <div class="hover-meta">
           ${renderBadges(reg)}
@@ -3292,6 +3460,7 @@
     if (!regs.length) return;
 
     state.activeHoverAddress = addr;
+    state.activeWorkbenchKey = "";
     els.hoverPanel.innerHTML = renderHoverPanelContent(regs, addr);
     refreshIcons(els.hoverPanel);
     els.hoverPanel.hidden = false;
@@ -3305,6 +3474,7 @@
 
   function hideHoverPanel() {
     state.activeHoverAddress = null;
+    state.activeWorkbenchKey = "";
     els.hoverPanel.hidden = true;
     els.hoverPanel.innerHTML = "";
     syncOpenCellHighlight();
@@ -3312,6 +3482,13 @@
 
   function repositionOrHideDetailPanel() {
     if (els.hoverPanel.hidden) return;
+    if (state.activeWorkbenchKey) {
+      const anchor = els.tableBody.querySelector(`.register-display[data-register-key="${CSS.escape(state.activeWorkbenchKey)}"]`);
+      if (anchor) {
+        positionDetailPanel(anchor);
+        return;
+      }
+    }
     const cell = getOpenRegisterCell();
     if (!cell) {
       hideHoverPanel();
@@ -3739,6 +3916,224 @@
     if (els.importResultDialog.open) els.importResultDialog.close();
     els.importResultDialog.showModal();
     refreshIcons(els.importResultDialog);
+  }
+
+  function importPreviewStatusLabel(status) {
+    return ({ new: "新增", update: "更新", unchanged: "无结构变化", rejected: "拒绝" })[status] || status || "待处理";
+  }
+
+  function previewEnumItems(field) {
+    if (Array.isArray(field?.values)) return field.values;
+    if (field?.values && typeof field.values === "object") {
+      return Object.entries(field.values).map(([value, desc]) => ({ value, desc }));
+    }
+    return [];
+  }
+
+  function previewDocumentMaps(document) {
+    const registers = new Map();
+    const fields = new Map();
+    const enums = new Map();
+    Object.entries(document?.pages || {}).forEach(([pageName, page]) => {
+      (page?.registers || []).forEach((register, registerIndex) => {
+        const hasEncoding = register.encoding && Object.keys(register.encoding).length > 0;
+        const locator = register.addr ?? (hasEncoding ? JSON.stringify(register.encoding) : `index:${registerIndex}`);
+        const registerKey = `${pageName}/${register.name || `#${registerIndex}`}@${locator}`;
+        registers.set(registerKey, JSON.stringify(register));
+        (register.fields || []).forEach((field, fieldIndex) => {
+          const fieldKey = `${registerKey}/${field.name || `#${fieldIndex}`}/${field.bits ?? ""}`;
+          fields.set(fieldKey, JSON.stringify(field));
+          previewEnumItems(field).forEach((item, enumIndex) => {
+            const enumKey = `${fieldKey}/${String(item.value ?? enumIndex)}@${item.condition || ""}`;
+            enums.set(enumKey, JSON.stringify(item));
+          });
+        });
+      });
+    });
+    return { registers, fields, enums };
+  }
+
+  function comparePreviewMaps(before, after, added, removed, modified) {
+    for (const [key, value] of after) {
+      if (!before.has(key)) added.push(key);
+      else if (before.get(key) !== value) modified.push(key);
+    }
+    for (const key of before.keys()) {
+      if (!after.has(key)) removed.push(key);
+    }
+  }
+
+  function compareBrowserChipDocuments(beforeDocument, afterDocument) {
+    const before = previewDocumentMaps(beforeDocument);
+    const after = previewDocumentMaps(afterDocument);
+    const changes = {
+      addedRegisters: [], removedRegisters: [], modifiedRegisters: [],
+      addedFields: [], removedFields: [], modifiedFields: [],
+      addedEnums: [], removedEnums: [], modifiedEnums: [],
+    };
+    comparePreviewMaps(before.registers, after.registers, changes.addedRegisters, changes.removedRegisters, changes.modifiedRegisters);
+    comparePreviewMaps(before.fields, after.fields, changes.addedFields, changes.removedFields, changes.modifiedFields);
+    comparePreviewMaps(before.enums, after.enums, changes.addedEnums, changes.removedEnums, changes.modifiedEnums);
+    return changes;
+  }
+
+  function browserImportRecord(item) {
+    return libraryRecords.find((record) => {
+      const chip = record.chipData || chips.find((candidate) => getNavigationChipId(candidate) === record.id);
+      return record.sourceName === item.sourceName || chip?._source === item.sourceName || record.sensor === item.data?.sensor;
+    }) || null;
+  }
+
+  function buildBrowserImportPreview(sources, translations, failures) {
+    const translationHashes = new Set(translations.map((item) => item.sourceSha256));
+    const files = sources.map((item) => {
+      const previous = browserImportRecord(item);
+      const previousChip = previous?.chipData || chips.find((chip) => getNavigationChipId(chip) === previous?.id);
+      const sourceHashChanged = Boolean(previous && previous.sourceSha256 !== item.sourceSha256);
+      const hasTranslation = translationHashes.has(item.sourceSha256)
+        || (previous?.translations || []).some((translation) => {
+          return translation.sourceSha256 === item.sourceSha256
+            || translationDocumentFromRecord(translation)?.source_sha256 === item.sourceSha256;
+        });
+      return {
+        sourceName: item.sourceName,
+        kind: "source",
+        sensor: item.data?.sensor || "",
+        status: previous ? (sourceHashChanged ? "update" : "unchanged") : "new",
+        sourceHashChanged,
+        translationMissing: !hasTranslation,
+        changes: compareBrowserChipDocuments(previousChip || {}, item.data || {}),
+      };
+    });
+    for (const item of translations) {
+      const record = libraryRecords.find((candidate) => candidate.sourceSha256 === item.sourceSha256);
+      const existing = (record?.translations || []).find((translation) => {
+        return translationDocumentFromRecord(translation)?.locale === item.data?.locale;
+      });
+      files.push({
+        sourceName: item.sourceName,
+        kind: "translation",
+        sensor: item.data?.translations?.sensor || record?.sensor || "",
+        status: existing ? (existing.yamlText === item.text ? "unchanged" : "update") : "new",
+        sourceHashChanged: Boolean(existing && existing.sourceSha256 !== item.sourceSha256),
+        translationMissing: false,
+        changes: {},
+      });
+    }
+    return { previewId: "browser-import-preview", files, failures, folder: null };
+  }
+
+  function importPreviewText(report) {
+    const files = Array.isArray(report.files) ? report.files : [];
+    const counts = files.reduce((result, file) => {
+      result[file.status] = (result[file.status] || 0) + 1;
+      return result;
+    }, {});
+    const lines = [
+      `文件：${files.length} · 新增 ${counts.new || 0} · 更新 ${counts.update || 0} · 无结构变化 ${counts.unchanged || 0} · 拒绝 ${counts.rejected || 0}`,
+    ];
+    if (report.folder) lines.push(`目录：${report.folder}`);
+    for (const file of files) {
+      const changes = file.changes || {};
+      const parts = [
+        changes.addedRegisters?.length ? `新增寄存器 ${changes.addedRegisters.length}` : "",
+        changes.removedRegisters?.length ? `删除寄存器 ${changes.removedRegisters.length}` : "",
+        changes.modifiedRegisters?.length ? `修改寄存器 ${changes.modifiedRegisters.length}` : "",
+        changes.addedFields?.length ? `新增位域 ${changes.addedFields.length}` : "",
+        changes.removedFields?.length ? `删除位域 ${changes.removedFields.length}` : "",
+        changes.modifiedFields?.length ? `修改位域 ${changes.modifiedFields.length}` : "",
+        changes.addedEnums?.length ? `新增枚举 ${changes.addedEnums.length}` : "",
+        changes.removedEnums?.length ? `删除枚举 ${changes.removedEnums.length}` : "",
+        changes.modifiedEnums?.length ? `修改枚举 ${changes.modifiedEnums.length}` : "",
+        file.sourceHashChanged ? "源哈希变化" : "",
+        file.translationMissing ? "缺少译文" : "",
+      ].filter(Boolean);
+      lines.push(`\n[${importPreviewStatusLabel(file.status)}] ${file.sourceName} · ${file.kind === "translation" ? "译文" : file.sensor || "未知芯片"}`);
+      lines.push(parts.length ? `  ${parts.join(" · ")}` : "  无结构变化");
+    }
+    if (report.failures?.length) {
+      lines.push("\n无法预览：");
+      lines.push(...report.failures.map((failure) => `  ${failure}`));
+    }
+    return lines.join("\n");
+  }
+
+  function openImportPreview(report, label) {
+    if (!report || report.canceled) return false;
+    state.importPreviewId = report.previewId || "";
+    state.importPreviewLabel = label;
+    els.importPreviewTitle.textContent = `${label}预览`;
+    const fileCount = report.files?.length || 0;
+    const acceptedCount = (report.files || []).filter((file) => file.status !== "rejected").length;
+    els.importPreviewSummary.textContent = acceptedCount
+      ? `${acceptedCount} 个文件将在确认后写入芯片库；取消不会修改现有数据。`
+      : "没有可导入的合规文件；关闭不会修改现有数据。";
+    els.importPreviewDetails.textContent = importPreviewText(report);
+    els.importPreviewCancelButton.disabled = false;
+    els.importPreviewCancelAction.disabled = false;
+    els.importPreviewConfirmButton.disabled = !state.importPreviewId || !fileCount;
+    els.importPreviewConfirmButton.dataset.canImport = acceptedCount ? "true" : "false";
+    els.importPreviewConfirmButton.textContent = acceptedCount ? "确认导入" : "关闭";
+    els.importPreviewDialog.showModal();
+    refreshIcons(els.importPreviewDialog);
+    window.setTimeout(() => els.importPreviewConfirmButton.focus(), 0);
+    return true;
+  }
+
+  async function cancelImportPreview() {
+    const previewId = state.importPreviewId;
+    const resolver = state.importPreviewResolver;
+    state.importPreviewId = "";
+    state.importPreviewLabel = "";
+    state.importPreviewResolver = null;
+    if (previewId && isDesktopApp()) {
+      try { await getInvoke()("cancel_yaml_import_preview", { previewId }); } catch (_error) { /* expired previews are harmless */ }
+    }
+    if (els.importPreviewDialog.open) els.importPreviewDialog.close();
+    setLibraryStatus("已取消导入");
+    resolver?.(false);
+  }
+
+  function requestBrowserImportConfirmation(report) {
+    return new Promise((resolve) => {
+      state.importPreviewResolver = resolve;
+      openImportPreview(report, "文件导入");
+    });
+  }
+
+  async function confirmImportPreview() {
+    if (els.importPreviewConfirmButton.dataset.canImport !== "true") {
+      await cancelImportPreview();
+      return;
+    }
+    const previewId = state.importPreviewId;
+    const label = state.importPreviewLabel || "文件导入";
+    if (!previewId || !isDesktopApp()) {
+      const resolver = state.importPreviewResolver;
+      state.importPreviewResolver = null;
+      state.importPreviewId = "";
+      state.importPreviewLabel = "";
+      if (els.importPreviewDialog.open) els.importPreviewDialog.close();
+      resolver?.(true);
+      return;
+    }
+    els.importPreviewConfirmButton.disabled = true;
+    els.importPreviewCancelButton.disabled = true;
+    els.importPreviewCancelAction.disabled = true;
+    els.importPreviewSummary.textContent = "正在确认并写入芯片库...";
+    try {
+      const report = await getInvoke()("confirm_yaml_import_preview", { previewId });
+      state.importPreviewId = "";
+      state.importPreviewLabel = "";
+      els.importPreviewDialog.close();
+      await applyDesktopImportReport(report, label);
+    } catch (error) {
+      els.importPreviewConfirmButton.disabled = false;
+      els.importPreviewCancelButton.disabled = false;
+      els.importPreviewCancelAction.disabled = false;
+      els.importPreviewSummary.textContent = errorMessage(error);
+      setLibraryStatus(errorMessage(error), true);
+    }
   }
 
   function getActiveNoteRegister() {
@@ -4241,8 +4636,12 @@
     if (isDesktopApp()) {
       setLibraryStatus("正在选择 YAML / 译文...", false);
       try {
-        const report = await getInvoke()("import_yaml_files", { category: null });
-        await applyDesktopImportReport(report, "文件导入");
+        const preview = await getInvoke()("preview_yaml_files", { category: null });
+        if (preview.canceled || !preview.previewId) {
+          setLibraryStatus("已取消文件导入");
+          return;
+        }
+        openImportPreview(preview, "文件导入");
       } catch (error) {
         const message = errorMessage(error);
         setLibraryStatus(message, true);
@@ -4271,6 +4670,16 @@
     const failures = Array.isArray(parsed.failures) ? [...parsed.failures] : [];
     const sources = Array.isArray(parsed.sources) ? parsed.sources : [];
     const translations = Array.isArray(parsed.translations) ? parsed.translations : [];
+    if (!sources.length && !translations.length) {
+      state.loadMessage = failures.length ? `未导入：${failures.length} 个文件未通过规范检查` : "未找到可导入的 YAML";
+      render();
+      if (failures.length) showImportFailures("YAML 未导入", "所选文件未通过规范检查。", failures);
+      return;
+    }
+    const previewAccepted = await requestBrowserImportConfirmation(
+      buildBrowserImportPreview(sources, translations, failures),
+    );
+    if (!previewAccepted) return;
 
     let selectedIndex = state.chipIndex;
     let selectedSourceSha256 = "";
@@ -4437,13 +4846,13 @@
     setLibraryStatus("正在读取目录...");
     if (state.libraryOpen) renderLibraryList();
     try {
-      const report = await getInvoke()("import_yaml_directory", { category: null });
-      if (!report.folder) {
+      const preview = await getInvoke()("preview_yaml_directory", { category: null });
+      if (!preview.folder || preview.canceled) {
         setLibraryStatus("已取消目录导入");
         if (state.libraryOpen) renderLibraryList();
         return;
       }
-      await applyDesktopImportReport(report, "目录导入");
+      openImportPreview(preview, "目录导入");
     } catch (error) {
       const message = errorMessage(error);
       setLibraryStatus(message, true);
@@ -4880,6 +5289,13 @@
     els.libraryCloseButton.addEventListener("click", closeLibrary);
     els.importResultCloseButton.addEventListener("click", () => els.importResultDialog.close());
     els.importResultConfirmButton.addEventListener("click", () => els.importResultDialog.close());
+    els.importPreviewCancelButton.addEventListener("click", cancelImportPreview);
+    els.importPreviewCancelAction.addEventListener("click", cancelImportPreview);
+    els.importPreviewConfirmButton.addEventListener("click", confirmImportPreview);
+    els.importPreviewDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      cancelImportPreview();
+    });
     els.noteDialogCloseButton.addEventListener("click", closeNoteDialog);
     els.noteDialog.addEventListener("cancel", (event) => {
       event.preventDefault();
@@ -5086,6 +5502,12 @@
     els.hoverPanel.addEventListener("input", handleRegisterValueInput);
     els.hoverPanel.addEventListener("click", (event) => {
       if (handleNoteEditButton(event)) return;
+      const copyButton = event.target.closest("[data-detail-copy]");
+      if (copyButton) {
+        const reg = state.activeWorkbenchKey ? findRegisterByKey(state.activeWorkbenchKey) : null;
+        if (reg) copyDetailValue(reg, copyButton.dataset.detailCopy, copyButton);
+        return;
+      }
       if (event.target.closest(".hover-close")) hideHoverPanel();
     });
 
