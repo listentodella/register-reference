@@ -1,0 +1,40 @@
+schema_version: 2
+sensor: UNKNOWNSPACE
+register_space:
+  kind: "pci_config"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "example source"
+  version: "FIXTURE"
+  document: "example document"
+  url: "https://example.com/fixture"
+  license: "example license"
+pages:
+  Functional Group:
+    access: "MRS / MSR system-register interface"
+    desc: "unsupported register space kind"
+    registers:
+      - name: "EXAMPLE"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "example register"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 0
+          crm: 0
+          op2: 0
+        accessors:
+          - name: "EXAMPLE"
+            kind: "read"
+            instruction: "MRS <Xt>, EXAMPLE"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 0
+              crm: 0
+              op2: 0

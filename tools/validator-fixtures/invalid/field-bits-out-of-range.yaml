@@ -1,0 +1,20 @@
+schema_version: 1
+sensor: BITRANGE
+who_am_i:
+  reg: null
+  values: []
+pages:
+  UI:
+    page_id: 0x00
+    access: "SPI"
+    desc: "field wider than the register"
+    registers:
+      - addr: 0x00
+        name: CTRL
+        access: RW
+        width: 1
+        desc: "control register"
+        fields:
+          - name: too_wide
+            bits: "31:0"
+            desc: "exceeds the 8-bit register width"

@@ -1410,3 +1410,66 @@ pub(crate) fn validate_register_yaml(text: &str, document: &Value) -> Result<(),
     }
     validator.finish()
 }
+
+/// Shared fixtures that `tools/test-validator-parity.mjs` also runs through `yaml-validator.js`.
+/// Both implementations must classify every fixture the same way, otherwise a file that imports in
+/// the browser build would be rejected by the desktop build (or the other way around).
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn fixture_paths(directory: &str) -> Vec<PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("tools")
+            .join("validator-fixtures")
+            .join(directory);
+        let mut paths: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap_or_else(|error| panic!("无法读取 {}：{error}", root.display()))
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "yaml")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn verdict(path: &Path) -> Result<(), String> {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("无法读取 {}：{error}", path.display()));
+        let document: Value = serde_yaml::from_str(&text).unwrap_or(Value::Null);
+        validate_register_yaml(&text, &document)
+    }
+
+    #[test]
+    fn accepts_every_valid_fixture() {
+        let paths = fixture_paths("valid");
+        assert!(!paths.is_empty(), "tools/validator-fixtures/valid 不应为空");
+        for path in paths {
+            if let Err(message) = verdict(&path) {
+                panic!("{} 应被接受，但被拒绝：{message}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_every_invalid_fixture() {
+        let paths = fixture_paths("invalid");
+        assert!(
+            !paths.is_empty(),
+            "tools/validator-fixtures/invalid 不应为空"
+        );
+        for path in paths {
+            assert!(
+                verdict(&path).is_err(),
+                "{} 应被拒绝，但被接受",
+                path.display()
+            );
+        }
+    }
+}

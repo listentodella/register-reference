@@ -82,6 +82,9 @@ jobs:
       - name: Test RISC-V register importer
         run: npm run test:riscv-import
 
+      - name: Test validator fixtures
+        run: npm run test:validator
+
       - name: Test dump analyzer
         run: npm run test:dump
 

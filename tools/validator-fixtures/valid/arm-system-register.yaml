@@ -1,0 +1,74 @@
+schema_version: 2
+sensor: "ARM AArch64 system registers"
+vendor: "Arm"
+family: "A-profile architecture"
+device_type: "architecture_registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Arm Architecture System Registers XML"
+  version: "FIXTURE"
+  revision: "M.c"
+  document: "Arm Architecture Reference Manual, A-profile system-register XML"
+  url: "https://developer.arm.com/fixture"
+  license: "Arm proprietary; review notice.xml before use"
+  notice: "FIXTURE"
+pages:
+  Functional Group:
+    access: "MRS / MSR system-register interface"
+    desc: "Architectural system-register category"
+    registers:
+      - name: "SCTLR_EL1"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "System Control Register"
+        execution_state: "AArch64"
+        condition: "when FEAT_AA64 is implemented"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 1
+          crm: 0
+          op2: 0
+        accessors:
+          - name: "SCTLR_EL1"
+            kind: "read"
+            instruction: "MRS <Xt>, SCTLR_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 0
+              op2: 0
+        source_ref: "AArch64-sctlr_el1.xml"
+        fields:
+          - name: "mode"
+            bits: "1:0"
+            access: "RW"
+            desc: "Execution mode"
+            values:
+              - value: "0b00"
+                desc: "Mode A"
+              - value: "0b1x"
+                desc: "Mode B"
+          - name: "range"
+            bits: "7:4"
+            access: "RW"
+            desc: "Range form"
+            values:
+              - value: "0b0000..0b0011"
+                desc: "Reserved range"
+          - name: "split"
+            bits: "63:56,3:2"
+            access: "RW"
+            desc: "Non-contiguous bitfield"
+          - name: "reserved_bits"
+            bits: "55:8"
+            access: "RO"
+            desc: "Reserved"
+            reserved: "RES0"

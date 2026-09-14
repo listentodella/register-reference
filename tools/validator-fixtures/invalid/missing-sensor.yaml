@@ -1,0 +1,15 @@
+schema_version: 1
+who_am_i:
+  reg: null
+  values: []
+pages:
+  UI:
+    page_id: 0x00
+    access: "SPI"
+    desc: "missing sensor key"
+    registers:
+      - addr: 0x00
+        name: CTRL
+        access: RW
+        width: 1
+        desc: "control register"

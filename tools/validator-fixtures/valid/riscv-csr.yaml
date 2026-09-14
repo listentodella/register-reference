@@ -1,0 +1,50 @@
+schema_version: 2
+sensor: "RISC-V RV64 CSRs"
+vendor: "RISC-V"
+family: "Unified Database"
+device_type: "architecture_registers"
+register_space:
+  kind: "riscv_system"
+  architecture: "RV64"
+  profile: "privileged"
+source:
+  title: "RISC-V Unified Database"
+  version: "FIXTURE"
+  revision: "0000000000000000000000000000000000000000"
+  document: "RISC-V Privileged Specification CSRs"
+  url: "https://github.com/riscv-software-src/riscv-unified-db"
+  license: "BSD-3-Clause-Clear"
+pages:
+  Machine:
+    access: "CSR instruction encoding space"
+    desc: "Machine-level CSRs"
+    registers:
+      - name: "mstatus"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "Machine Status"
+        execution_state: "RV64"
+        encoding:
+          scheme: "riscv_csr"
+          address: 0x300
+        accessors:
+          - name: "mstatus"
+            kind: "read"
+            instruction: "CSRRS rd, mstatus, x0"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x300
+        fields:
+          - name: "MIE"
+            bits: "3"
+            access: "RW"
+            desc: "Machine interrupt enable"
+          - name: "MPP"
+            bits: "12:11"
+            access: "RW"
+            desc: "Machine previous privilege mode"
+            values:
+              0x0: "User"
+              0x1: "Supervisor"
+              0x3: "Machine"

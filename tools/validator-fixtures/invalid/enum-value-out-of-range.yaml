@@ -1,0 +1,23 @@
+schema_version: 1
+sensor: ENUMRANGE
+who_am_i:
+  reg: null
+  values: []
+pages:
+  UI:
+    page_id: 0x00
+    access: "SPI"
+    desc: "enum value wider than the field"
+    registers:
+      - addr: 0x00
+        name: CTRL
+        access: RW
+        width: 1
+        desc: "control register"
+        fields:
+          - name: mode
+            bits: "1:0"
+            desc: "operation mode"
+            values:
+              0x0: "standby"
+              0x4: "does not fit in two bits"

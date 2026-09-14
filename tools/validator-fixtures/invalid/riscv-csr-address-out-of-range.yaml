@@ -1,0 +1,33 @@
+schema_version: 2
+sensor: "RISC-V RV64 CSRs"
+register_space:
+  kind: "riscv_system"
+  architecture: "RV64"
+  profile: "privileged"
+source:
+  title: "RISC-V Unified Database"
+  version: "FIXTURE"
+  document: "RISC-V Privileged Specification CSRs"
+  url: "https://github.com/riscv-software-src/riscv-unified-db"
+  license: "BSD-3-Clause-Clear"
+pages:
+  Machine:
+    access: "CSR instruction encoding space"
+    desc: "Machine-level CSRs"
+    registers:
+      - name: "bad_csr"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "CSR address must fit in 12 bits"
+        execution_state: "RV64"
+        encoding:
+          scheme: "riscv_csr"
+          address: 0x1000
+        accessors:
+          - name: "bad_csr"
+            kind: "read"
+            instruction: "CSRRS rd, bad_csr, x0"
+            encoding:
+              scheme: "riscv_csr"
+              address: 0x1000

@@ -1,0 +1,40 @@
+schema_version: 1
+sensor: "ARM AArch64 system registers"
+register_space:
+  kind: "arm_system"
+  architecture: "AArch64"
+  profile: "A"
+source:
+  title: "Arm Architecture System Registers XML"
+  version: "FIXTURE"
+  document: "Arm Architecture Reference Manual"
+  url: "https://developer.arm.com/fixture"
+  license: "Arm proprietary; review notice.xml before use"
+pages:
+  Functional Group:
+    access: "MRS / MSR system-register interface"
+    desc: "system registers require schema_version 2"
+    registers:
+      - name: "SCTLR_EL1"
+        access: "RW"
+        width: 8
+        bit_width: 64
+        desc: "System Control Register"
+        encoding:
+          scheme: "aarch64_sysreg"
+          op0: 3
+          op1: 0
+          crn: 1
+          crm: 0
+          op2: 0
+        accessors:
+          - name: "SCTLR_EL1"
+            kind: "read"
+            instruction: "MRS <Xt>, SCTLR_EL1"
+            encoding:
+              scheme: "aarch64_sysreg"
+              op0: 3
+              op1: 0
+              crn: 1
+              crm: 0
+              op2: 0
