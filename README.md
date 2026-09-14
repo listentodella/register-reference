@@ -63,6 +63,8 @@ npm ci
 npm run dev
 ```
 
+项目使用 npm 和 `package-lock.json`。用 pnpm 或 yarn 调用这些脚本时，它们会把自己的配置注入成 `npm_config_*` 环境变量，npm 因此打印 `Unknown env config` 警告；这类警告不影响构建，直接用 `npm run dev` 就不会出现。
+
 构建当前平台的免安装应用：
 
 ```bash

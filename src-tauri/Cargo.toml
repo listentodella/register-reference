@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Local chip register reference library"
 authors = ["Register Reference contributors"]
 edition = "2021"
+# `cargo run` ignores required-features when picking a target, so the optional MCP binary makes it
+# ambiguous. Tauri's dev command runs `cargo run` without `--bin`.
+default-run = "register-reference"
 
 [lib]
 name = "register_reference_lib"
