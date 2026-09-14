@@ -1,0 +1,17 @@
+<view class="placeholder">
+  <view class="placeholder-title">芯片库</view>
+  <view class="placeholder-body">移动端没有本地磁盘，导入方式与桌面版不同，因此这里需要重新设计。</view>
+</view>
+
+<view class="section">
+  <view class="section-head">
+    <text class="section-title">计划中的能力</text>
+    <text class="section-hint">待实现</text>
+  </view>
+  <view class="planned-list">
+    <view class="planned-item" wx:for="{{planned}}" wx:key="*this">
+      <view class="planned-dot"></view>
+      <text class="planned-text">{{item}}</text>
+    </view>
+  </view>
+</view>

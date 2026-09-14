@@ -1,0 +1,17 @@
+<view class="placeholder">
+  <view class="placeholder-title">全库搜索</view>
+  <view class="placeholder-body">桌面版用 SQLite FTS5 建索引；移动端改用内存索引，实测 7467 条文档建索引约 10ms，性能充足。</view>
+</view>
+
+<view class="section">
+  <view class="section-head">
+    <text class="section-title">计划中的能力</text>
+    <text class="section-hint">待实现</text>
+  </view>
+  <view class="planned-list">
+    <view class="planned-item" wx:for="{{planned}}" wx:key="*this">
+      <view class="planned-dot"></view>
+      <text class="planned-text">{{item}}</text>
+    </view>
+  </view>
+</view>

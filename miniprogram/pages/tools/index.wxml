@@ -1,0 +1,249 @@
+<view class="page">
+  <view class="section">
+    <view class="section-head">
+      <text class="section-title">进制转换</text>
+      <text class="section-hint">{{signed ? '二补码有符号' : '无符号'}} · {{bitWidth}} bit</text>
+    </view>
+
+    <view class="control-row">
+      <view class="segmented">
+        <view
+          class="seg-item {{bitWidth === item ? 'active' : ''}}"
+          wx:for="{{widths}}"
+          wx:key="*this"
+          data-width="{{item}}"
+          bindtap="onWidthChange"
+        >{{item}} bit</view>
+      </view>
+    </view>
+
+    <view class="control-row">
+      <view class="segmented">
+        <view class="seg-item {{signed ? '' : 'active'}}" data-signed="false" bindtap="onSignedChange">无符号</view>
+        <view class="seg-item {{signed ? 'active' : ''}}" data-signed="true" bindtap="onSignedChange">有符号</view>
+      </view>
+    </view>
+
+    <view class="input-row">
+      <text class="input-label">HEX</text>
+      <input
+        class="input-box mono {{inputErrors.hex ? 'invalid' : ''}}"
+        type="text"
+        value="{{hexText}}"
+        data-kind="hex"
+        bindinput="onValueInput"
+        bindblur="onValueBlur"
+      />
+    </view>
+
+    <view class="input-row">
+      <text class="input-label">DEC</text>
+      <input
+        class="input-box mono {{inputErrors.dec ? 'invalid' : ''}}"
+        type="text"
+        value="{{decText}}"
+        data-kind="dec"
+        bindinput="onValueInput"
+        bindblur="onValueBlur"
+      />
+    </view>
+
+    <view class="input-row">
+      <text class="input-label">BIN</text>
+      <input
+        class="input-box mono {{inputErrors.bin ? 'invalid' : ''}}"
+        type="text"
+        value="{{binText}}"
+        data-kind="bin"
+        bindinput="onValueInput"
+        bindblur="onValueBlur"
+      />
+    </view>
+
+    <view class="status {{statusError ? 'error' : ''}}">{{status}}</view>
+  </view>
+
+  <view class="section">
+    <view class="section-head">
+      <text class="section-title">位域组合</text>
+      <text class="section-hint" bindtap="onResetFields">重置划分</text>
+    </view>
+    <view class="composer-hint">拖动位号划定位域 · 点击数值翻转该位</view>
+
+    <scroll-view class="composer" scroll-x="{{true}}" bindscroll="onComposerScroll" enhanced="{{true}}" show-scrollbar="{{false}}">
+      <view class="composer-inner" style="width: {{trackWidth}}rpx">
+        <view class="byte-row">
+          <view class="byte mono" wx:for="{{bytes}}" wx:key="start" style="width: {{columnWidth * 8}}rpx">{{item.text}}</view>
+        </view>
+
+        <view class="bit-row">
+          <view
+            class="bit-cell {{item.set ? 'set' : ''}} {{item.active ? 'active' : ''}} {{item.preview ? 'preview' : ''}}"
+            wx:for="{{bits}}"
+            wx:key="index"
+            style="width: {{columnWidth}}rpx"
+          >
+            <view
+              class="bit-index"
+              data-bit-index="{{item.index}}"
+              catchtouchstart="onBitIndexStart"
+              catchtouchmove="onBitIndexMove"
+              catchtouchend="onBitIndexEnd"
+              catchtouchcancel="onBitIndexCancel"
+            >{{item.index}}</view>
+            <view class="bit-value" data-bit="{{item.index}}" catchtap="onBitToggle">{{item.set ? 1 : 0}}</view>
+          </view>
+        </view>
+
+        <view class="track">
+          <text class="track-label">范围</text>
+          <view class="track-row">
+            <view
+              class="cell range {{item.active ? 'active' : ''}} {{item.narrow ? 'narrow' : ''}}"
+              wx:for="{{fields}}"
+              wx:key="key"
+              style="width: {{item.widthRpx}}rpx"
+              data-key="{{item.key}}"
+              catchtap="onSelectField"
+            >{{item.range}}</view>
+          </view>
+        </view>
+
+        <view class="track">
+          <text class="track-label">HEX</text>
+          <view class="track-row">
+            <input
+              class="cell input mono {{item.hexInvalid ? 'invalid' : ''}}"
+              wx:for="{{fields}}"
+              wx:key="key"
+              style="width: {{item.widthRpx}}rpx"
+              type="text"
+              value="{{item.hex}}"
+              data-key="{{item.key}}"
+              data-kind="hex"
+              bindinput="onFieldInput"
+              bindblur="onFieldBlur"
+            />
+          </view>
+        </view>
+
+        <view class="track">
+          <text class="track-label">DEC</text>
+          <view class="track-row">
+            <input
+              class="cell input mono {{item.decInvalid ? 'invalid' : ''}}"
+              wx:for="{{fields}}"
+              wx:key="key"
+              style="width: {{item.widthRpx}}rpx"
+              type="text"
+              value="{{item.dec}}"
+              data-key="{{item.key}}"
+              data-kind="dec"
+              bindinput="onFieldInput"
+              bindblur="onFieldBlur"
+            />
+          </view>
+        </view>
+
+        <view class="track">
+          <text class="track-label">名称</text>
+          <view class="track-row">
+            <input
+              class="cell input"
+              wx:for="{{fields}}"
+              wx:key="key"
+              style="width: {{item.widthRpx}}rpx"
+              type="text"
+              maxlength="80"
+              value="{{item.name}}"
+              data-key="{{item.key}}"
+              data-kind="name"
+              bindinput="onFieldInput"
+              bindblur="onFieldBlur"
+            />
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <view class="section">
+    <view class="section-head">
+      <text class="section-title">常用操作</text>
+      <text class="section-hint">结果按当前位宽截取</text>
+    </view>
+    <view class="operation-grid">
+      <view
+        class="operation"
+        wx:for="{{operations}}"
+        wx:key="key"
+        data-operation="{{item.key}}"
+        bindtap="onOperation"
+      >{{item.label}}</view>
+    </view>
+    <view class="shift-row">
+      <view class="shift-command" data-operation="shift-left" bindtap="onOperation">左移</view>
+      <view class="stepper">
+        <input class="stepper-input mono" type="number" value="{{shiftLeft}}" data-direction="left" bindinput="onShiftInput" />
+        <view class="stepper-buttons">
+          <view class="stepper-button" data-direction="left" data-delta="1" bindtap="onShiftStep">+</view>
+          <view class="stepper-button" data-direction="left" data-delta="-1" bindtap="onShiftStep">−</view>
+        </view>
+      </view>
+      <text class="shift-unit">位</text>
+    </view>
+    <view class="shift-row">
+      <view class="shift-command" data-operation="shift-right" bindtap="onOperation">右移</view>
+      <view class="stepper">
+        <input class="stepper-input mono" type="number" value="{{shiftRight}}" data-direction="right" bindinput="onShiftInput" />
+        <view class="stepper-buttons">
+          <view class="stepper-button" data-direction="right" data-delta="1" bindtap="onShiftStep">+</view>
+          <view class="stepper-button" data-direction="right" data-delta="-1" bindtap="onShiftStep">−</view>
+        </view>
+      </view>
+      <text class="shift-unit">位</text>
+    </view>
+  </view>
+
+  <view class="section">
+    <view class="section-head">
+      <text class="section-title">计算器</text>
+      <text class="section-hint" bindtap="onClearHistory">清除历史</text>
+    </view>
+    <view class="calculator-form">
+      <text class="calculator-prompt mono">&gt;&gt;&gt;</text>
+      <input
+        class="calculator-input mono"
+        type="text"
+        value="{{calculatorInput}}"
+        placeholder="例如 0x20 + 10 或 1 << 10"
+        confirm-type="done"
+        bindinput="onCalculatorInput"
+        bindconfirm="onSubmitExpression"
+      />
+      <view class="calculator-submit" bindtap="onSubmitExpression">执行</view>
+    </view>
+    <view class="calculator-hint">支持 + - * / // % ** &amp; | ^ &lt;&lt; &gt;&gt; 与 ~，ans 表示上一条结果</view>
+
+    <view class="history" wx:if="{{history.length}}">
+      <view class="history-entry" wx:for="{{history}}" wx:key="expression">
+        <view class="history-expression">
+          <text class="mono muted">&gt;&gt;&gt; </text>
+          <text class="mono">{{item.expression}}</text>
+        </view>
+        <view class="history-error" wx:if="{{item.error}}">{{item.error}}</view>
+        <view class="history-result" wx:else data-dec="{{item.dec}}" bindtap="onUseResult">
+          <view class="history-value">
+            <text class="history-base">DEC</text>
+            <text class="mono">{{item.dec}}</text>
+          </view>
+          <view class="history-value">
+            <text class="history-base">HEX</text>
+            <text class="mono">{{item.hex}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+    <view class="history-empty" wx:else>输入表达式后按回车或点“执行”，结果会显示十进制与十六进制。</view>
+  </view>
+</view>

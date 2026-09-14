@@ -91,6 +91,9 @@ jobs:
       - name: Test search worker
         run: npm run test:search
 
+      - name: Test WeChat mini program sources
+        run: npm run test:miniprogram
+
       - name: Test web interface
         run: npm run test:web
 

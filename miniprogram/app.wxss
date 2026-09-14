@@ -1,0 +1,150 @@
+/* 主题令牌沿用桌面版 styles.css 的语义分层，保证两端观感一致。 */
+
+page {
+  --bg: #f4f6f7;
+  --panel: #ffffff;
+  --panel-soft: #f8faf9;
+  --control-bg: #ffffff;
+  --text: #15202b;
+  --text-soft: #364651;
+  --muted: #5b6875;
+  --subtle-text: #4f5f69;
+  --line: #d7dde2;
+  --line-strong: #aab6bf;
+  --accent: #00877c;
+  --accent-strong: #006e66;
+  --accent-ink: #005b54;
+  --accent-contrast: #ffffff;
+  --accent-soft: #dff3ef;
+  --accent-border: #69bbb0;
+  --amber: #b56b00;
+  --amber-soft: #fff1d7;
+  --amber-ink: #805300;
+  --red: #bf3f3f;
+  --red-soft: #ffe8e6;
+  --red-ink: #71312f;
+  --blue: #3267a8;
+  --blue-soft: #e8f0fb;
+  --blue-ink: #294f7f;
+  --surface-neutral: #eef1f3;
+  --surface-raised: #fbfcfd;
+  --disabled-bg: #aeb9bc;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  background: var(--bg);
+  color: var(--text);
+  font-size: 28rpx;
+  line-height: 1.55;
+}
+
+@media (prefers-color-scheme: dark) {
+  page {
+    --bg: #141618;
+    --panel: #1c2024;
+    --panel-soft: #22272b;
+    --control-bg: #252b30;
+    --text: #edf2f5;
+    --text-soft: #c7d0d6;
+    --muted: #aab5bd;
+    --subtle-text: #bdc7cd;
+    --line: #394149;
+    --line-strong: #626d76;
+    --accent: #46c2b3;
+    --accent-strong: #35a99c;
+    --accent-ink: #82e0d4;
+    --accent-contrast: #071c1a;
+    --accent-soft: #173b38;
+    --accent-border: #32988e;
+    --amber: #f2bd5b;
+    --amber-soft: #3c2e16;
+    --amber-ink: #ffd37e;
+    --red: #ff7b72;
+    --red-soft: #3d2223;
+    --red-ink: #ffb4ae;
+    --blue: #78b7ff;
+    --blue-soft: #1d3048;
+    --blue-ink: #b4d6ff;
+    --surface-neutral: #2a3035;
+    --surface-raised: #202529;
+    --disabled-bg: #4c555d;
+  }
+}
+
+.section {
+  margin: 20rpx 24rpx;
+  border: 1rpx solid var(--line);
+  border-radius: 16rpx;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20rpx 24rpx;
+  border-bottom: 1rpx solid var(--line);
+  background: var(--panel-soft);
+}
+
+.section-title {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.section-hint {
+  font-size: 22rpx;
+  color: var(--muted);
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.placeholder {
+  padding: 80rpx 40rpx;
+  text-align: center;
+}
+
+.placeholder-title {
+  font-size: 32rpx;
+  font-weight: 500;
+  color: var(--text-soft);
+}
+
+.placeholder-body {
+  margin-top: 16rpx;
+  font-size: 26rpx;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.planned-list {
+  padding: 8rpx 24rpx 20rpx;
+}
+
+.planned-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 12rpx 0;
+}
+
+.planned-dot {
+  flex: 0 0 auto;
+  width: 10rpx;
+  height: 10rpx;
+  margin: 16rpx 16rpx 0 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.planned-text {
+  flex: 1 1 auto;
+  font-size: 26rpx;
+  color: var(--text-soft);
+}

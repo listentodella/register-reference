@@ -1,0 +1,17 @@
+<view class="placeholder">
+  <view class="placeholder-title">设置</view>
+  <view class="placeholder-body">主题与语言沿用桌面版的语义令牌；存储需要显式做容量守卫，因为超出 10MB 时写入会静默失败。</view>
+</view>
+
+<view class="section">
+  <view class="section-head">
+    <text class="section-title">计划中的能力</text>
+    <text class="section-hint">待实现</text>
+  </view>
+  <view class="planned-list">
+    <view class="planned-item" wx:for="{{planned}}" wx:key="*this">
+      <view class="planned-dot"></view>
+      <text class="planned-text">{{item}}</text>
+    </view>
+  </view>
+</view>

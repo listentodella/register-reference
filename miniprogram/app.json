@@ -1,0 +1,32 @@
+{
+  "pages": [
+    "pages/tools/index",
+    "pages/library/index",
+    "pages/search/index",
+    "pages/settings/index"
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "@navBgColor",
+    "navigationBarTextStyle": "@navTxtStyle",
+    "navigationBarTitleText": "寄存器速查",
+    "backgroundColor": "@bgColor",
+    "backgroundTextStyle": "@bgTxtStyle"
+  },
+  "tabBar": {
+    "color": "@tabFontColor",
+    "selectedColor": "@tabSelectedColor",
+    "backgroundColor": "@tabBgColor",
+    "borderStyle": "@tabBorderStyle",
+    "list": [
+      { "pagePath": "pages/tools/index", "text": "工具" },
+      { "pagePath": "pages/library/index", "text": "芯片" },
+      { "pagePath": "pages/search/index", "text": "搜索" },
+      { "pagePath": "pages/settings/index", "text": "设置" }
+    ]
+  },
+  "darkmode": true,
+  "themeLocation": "theme.json",
+  "sitemapLocation": "sitemap.json",
+  "style": "v2",
+  "lazyCodeLoading": "requiredComponents"
+}

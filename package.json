@@ -12,6 +12,7 @@
     "test:arm-import": "node tools/test-arm-mrs-importer.mjs && node tools/test-arm-cmsis-importer.mjs",
     "test:arm-cmsis-import": "node tools/test-arm-cmsis-importer.mjs",
     "test:riscv-import": "node tools/test-riscv-csr-importer.mjs",
+    "test:miniprogram": "node miniprogram/tests/utils.test.mjs && node miniprogram/tests/structure.test.mjs && node miniprogram/tests/page-flow.test.mjs",
     "test:validator": "node tools/test-validator-parity.mjs",
     "test:dump": "node tools/test-dump-analyzer.mjs",
     "test:search": "node tools/test-search-worker.mjs",
