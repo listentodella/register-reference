@@ -17,3 +17,7 @@ __pycache__/
 
 # Local licensed/reference archives and generated Arm register datasets.
 /arm-system-registers-local/
+
+# WeChat DevTools writes per-developer settings (base library version, local
+# compile switches) here. It is not shared configuration.
+miniprogram/project.private.config.json
