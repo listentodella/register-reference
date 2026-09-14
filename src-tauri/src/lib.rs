@@ -3132,6 +3132,13 @@ fn build_standalone_html(records: &[ChipRecord], include_notes: bool) -> Result<
         ),
     );
     html = html.replace(
+        "<script src=\"dump-analyzer.js\"></script>",
+        &format!(
+            "<script>{}</script>",
+            include_str!("../../dump-analyzer.js")
+        ),
+    );
+    html = html.replace(
         "<script src=\"app.js\"></script>",
         &format!(
             "<script>window.REGISTER_SEARCH_WORKER_SOURCE={};</script><script>{}</script>",
@@ -3360,8 +3367,10 @@ mod tests {
         assert!(!html.contains("src=\"app.js\""));
         assert!(!html.contains("src=\"search-worker-inline.js\""));
         assert!(!html.contains("src=\"import-worker-inline.js\""));
+        assert!(!html.contains("src=\"dump-analyzer.js\""));
         assert!(html.contains("REGISTER_SEARCH_WORKER_SOURCE"));
         assert!(html.contains("REGISTER_IMPORT_WORKER_SOURCE"));
+        assert!(html.contains("register-dump-analysis/v1"));
         assert!(!html.contains("href=\"styles.css\""));
         assert!(html.contains("导出备注测试"));
         assert!(!build_standalone_html(&selected, false)

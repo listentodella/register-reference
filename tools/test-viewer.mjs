@@ -1649,7 +1649,250 @@ pages:
   await attachmentsPage.close();
   console.log(`[${browserEngine}] attachment checks passed`);
 
-  console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, chip library, register notes, and chip attachments`);
+  const dumpYaml = `schema_version: 1
+sensor: DUMPTEST
+vendor: WorkBuddy
+family: test
+device_type: test
+who_am_i:
+  reg: null
+  values: []
+pages:
+  Main:
+    page_id: 0x00
+    access: "SPI"
+    desc: "main page"
+    registers:
+      - addr: 0x00
+        name: CTRL
+        access: RW
+        width: 2
+        bit_width: 16
+        desc: "control register"
+        fields:
+          - name: mode
+            bits: "1:0"
+            desc: "工作模式"
+            values:
+              0x0: "standby"
+              0x1: "run"
+              0x2: "sleep"
+          - name: code
+            bits: "7:2"
+            desc: "命令码\\n0x10 = start\\n0x11 = stop"
+          - name: split
+            bits: "15:12,11:9"
+            desc: "非连续位域"
+      - addr: 0x10
+        name: STATUS
+        access: RO
+        width: 1
+        desc: "status register"
+        fields:
+          - name: ready
+            bits: "0"
+            desc: "就绪标志"
+            values:
+              0x0: "not ready"
+              0x1: "ready"
+      - addr: 0x20
+        name: WIDE
+        access: RW
+        width: 16
+        bit_width: 128
+        desc: "128-bit register"
+        fields:
+          - name: low
+            bits: "63:0"
+            desc: "low half"
+          - name: high
+            bits: "127:64"
+            desc: "high half"
+  Alternate:
+    page_id: 0x01
+    access: "SPI"
+    desc: "alternate page"
+    registers:
+      - addr: 0x00
+        name: CTRL
+        access: RW
+        width: 2
+        bit_width: 16
+        desc: "alternate control register"
+        fields:
+          - name: mode
+            bits: "1:0"
+            desc: "工作模式"
+            values:
+              0x0: "standby"
+              0x1: "run"
+      - addr: 0x10
+        name: STATUS
+        access: RO
+        width: 1
+        desc: "alternate status register"
+`;
+
+  const dumpPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const dumpErrors = [];
+  dumpPage.on("console", (message) => {
+    if (message.type() === "error") dumpErrors.push(message.text());
+  });
+  dumpPage.on("pageerror", (error) => dumpErrors.push(error.message));
+  await dumpPage.addInitScript(() => {
+    window.__clipboard = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text) => {
+          window.__clipboard.push(text);
+        },
+      },
+    });
+    const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => {
+      window.__exportBlob = blob;
+      return originalCreateObjectUrl(blob);
+    };
+    const originalClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function click() {
+      if (this.download) {
+        window.__downloadName = this.download;
+        return;
+      }
+      return originalClick.call(this);
+    };
+  });
+  await dumpPage.goto(pathToFileURL(resolve(root, "index.html")).href, { waitUntil: "load" });
+  await dumpPage.locator("#yamlFileInput").setInputFiles({
+    name: "dumptest.yaml",
+    mimeType: "application/yaml",
+    buffer: Buffer.from(dumpYaml),
+  });
+  await dumpPage.waitForSelector("#importPreviewDialog[open]");
+  await dumpPage.locator("#importPreviewConfirmButton").click();
+  await dumpPage.locator("#importPreviewDialog").waitFor({ state: "hidden" });
+  await dumpPage.waitForFunction(() => document.querySelector("#chipSelect option:checked")?.textContent === "DUMPTEST");
+
+  await dumpPage.locator("#toolsMenuButton").click();
+  await dumpPage.locator("#dumpAnalyzerButton").click();
+  await dumpPage.waitForSelector("#dumpAnalyzerDialog[open]");
+  assert.match(await dumpPage.locator("#dumpAnalyzerChip").innerText(), /DUMPTEST/);
+  assert.equal(await dumpPage.locator("#dumpCopyMarkdownButton").isDisabled(), true);
+  assert.equal(await dumpPage.locator("#dumpExportJsonButton").isDisabled(), true);
+
+  await dumpPage.locator("#dumpSingleInput").fill([
+    "Main.CTRL=0x01A1",
+    "CTRL=0x0002",
+    "0x10 0x01",
+    "0x99 0x01",
+    "CTRL 0x1 extra",
+  ].join("\n"));
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 5);
+  assert.deepEqual(
+    await dumpPage.$$eval("#dumpResults .dump-result-row", (rows) => rows.map((row) => row.dataset.dumpStatus)),
+    ["matched", "ambiguous", "ambiguous", "unknown", "invalid"],
+  );
+  assert.equal(await dumpPage.locator("#dumpResultSummary").innerText(), "已解析 5 行 · 显示 5 行");
+  const dumpFilterLabels = await dumpPage.$$eval("#dumpStatusFilters button", (buttons) => Object.fromEntries(buttons.map((button) => [button.dataset.dumpFilter, button.textContent.trim()])));
+  assert.deepEqual(dumpFilterLabels, {
+    all: "全部 5",
+    matched: "成功 1",
+    ambiguous: "歧义 2",
+    unknown: "未知 1",
+    invalid: "非法 1",
+  });
+
+  await dumpPage.locator('#dumpResults .dump-result-row[data-dump-status="matched"] [data-dump-expand]').click();
+  await dumpPage.waitForSelector("#dumpResults .dump-detail-row");
+  assert.deepEqual(
+    await dumpPage.$$eval("#dumpResults .dump-detail-row .dump-field-name", (cells) => cells.map((cell) => cell.firstChild.textContent.trim())),
+    ["mode", "code", "split"],
+  );
+  const dumpFieldText = await dumpPage.locator("#dumpResults .dump-detail-row").innerText();
+  assert.match(dumpFieldText, /run/);
+  assert.match(dumpFieldText, /0x28/);
+  assert.match(dumpFieldText, /未知枚举/);
+  await dumpPage.locator('#dumpResults .dump-result-row[data-dump-status="matched"] [data-dump-expand]').click();
+  await dumpPage.locator("#dumpResults .dump-detail-row").waitFor({ state: "detached" });
+
+  const dumpCandidateSelect = dumpPage.locator('#dumpResults .dump-result-row').nth(1).locator("select.dump-candidate-select");
+  assert.equal(await dumpCandidateSelect.locator("option").count(), 3);
+  await dumpCandidateSelect.selectOption({ index: 1 });
+  await dumpPage.waitForFunction(() => document.querySelectorAll('#dumpResults .dump-result-row[data-dump-status="matched"]').length === 2);
+  assert.match(await dumpPage.locator("#dumpResults .dump-result-row").nth(1).innerText(), /0x0002/);
+  assert.match(await dumpPage.locator("#dumpResults .dump-result-row").nth(2).innerText(), /找到 2 个候选/);
+
+  await dumpPage.locator('#dumpStatusFilters [data-dump-filter="unknown"]').click();
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 1);
+  await dumpPage.locator("#dumpTextFilter").fill("0x99");
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 1);
+  await dumpPage.locator("#dumpTextFilter").fill("0x11");
+  await dumpPage.waitForFunction(() => document.querySelector("#dumpResults .dump-empty-state") !== null);
+  await dumpPage.locator('#dumpStatusFilters [data-dump-filter="all"]').click();
+  await dumpPage.locator("#dumpTextFilter").fill("");
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 5);
+
+  assert.equal(await dumpPage.locator("#dumpExportJsonButton").isDisabled(), false);
+  await dumpPage.locator("#dumpExportJsonButton").click();
+  const exportedDump = JSON.parse(await dumpPage.evaluate(() => window.__exportBlob.text()));
+  assert.equal(exportedDump.schema, "register-dump-analysis/v1");
+  assert.equal(exportedDump.mode, "single");
+  assert.equal(exportedDump.chip.sensor, "DUMPTEST");
+  assert.deepEqual(
+    exportedDump.rows.map((row) => row.status),
+    ["matched", "matched", "ambiguous", "unknown", "invalid"],
+  );
+  assert.equal(exportedDump.rows[0].location.register, "CTRL");
+  assert.equal(exportedDump.rows[0].decoded.valueHex, "0x01A1");
+  assert.match(await dumpPage.evaluate(() => window.__downloadName), /-dump-analysis\.json$/);
+
+  await dumpPage.locator("#dumpCopyMarkdownButton").click();
+  await dumpPage.waitForFunction(() => window.__clipboard.length === 1);
+  const dumpMarkdown = await dumpPage.evaluate(() => window.__clipboard[0]);
+  assert.match(dumpMarkdown, /^# DUMPTEST 转储分析/);
+  assert.match(dumpMarkdown, /0x01A1/);
+  assert.match(dumpMarkdown, /mode\[1:0\] = 0x1 \(1\): run/);
+  assert.match(await dumpPage.locator("#dumpResultStatus").innerText(), /Markdown 已复制/);
+
+  await dumpPage.locator('[data-dump-mode="compare"]').click();
+  assert.equal(await dumpPage.locator('#dumpStatusFilters [data-dump-filter="changes"]').getAttribute("aria-pressed"), "true");
+  await dumpPage.locator("#dumpBeforeInput").fill("Main.CTRL=0x0001\nMain.STATUS=0x00\n");
+  await dumpPage.locator("#dumpAfterInput").fill("Main.CTRL=0x0003\nMain.STATUS=0x01\nMain.WIDE=0x1\n");
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 3);
+  assert.deepEqual(
+    (await dumpPage.$$eval("#dumpResults .dump-result-row", (rows) => rows.map((row) => row.dataset.dumpStatus))).sort(),
+    ["added", "changed", "changed"],
+  );
+  assert.equal(await dumpPage.locator("#dumpResultSummary").innerText(), "已对齐 3 项 · 显示 3 项");
+  await dumpPage.locator('#dumpResults .dump-result-row[data-dump-status="changed"]').first().locator("[data-dump-expand]").click();
+  await dumpPage.waitForSelector("#dumpResults .dump-detail-row");
+  const dumpComparisonText = await dumpPage.locator("#dumpResults .dump-detail-row").innerText();
+  assert.match(dumpComparisonText, /mode/);
+  assert.match(dumpComparisonText, /0x1/);
+  assert.match(dumpComparisonText, /0x3/);
+
+  await dumpPage.locator('#dumpStatusFilters [data-dump-filter="added"]').click();
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 1);
+  assert.match(await dumpPage.locator("#dumpResults .dump-result-row").innerText(), /WIDE/);
+  await dumpPage.locator('#dumpStatusFilters [data-dump-filter="changes"]').click();
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 3);
+
+  await dumpPage.locator('[data-dump-mode="single"]').click();
+  await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 5);
+  await dumpPage.locator('#dumpResults [data-dump-open-side="single"]').first().click();
+  await dumpPage.locator("#dumpAnalyzerDialog").waitFor({ state: "hidden" });
+  await dumpPage.waitForSelector("#hoverPanel:not([hidden])");
+  assert.equal(await dumpPage.locator("#tableViewButton").getAttribute("aria-selected"), "true");
+  assert.match(await dumpPage.locator("#hoverPanel").innerText(), /CTRL/);
+  await dumpPage.keyboard.press("Escape");
+  await dumpPage.locator("#hoverPanel").waitFor({ state: "hidden" });
+
+  assert.deepEqual(dumpErrors, []);
+  await dumpPage.close();
+  console.log(`[${browserEngine}] dump analyzer checks passed`);
+
+  console.log(`${browserEngine} viewer tests passed: themes, DWC3, YAML validation, chip library, register notes, chip attachments, and dump analysis`);
 } finally {
   let closeTimer;
   const closeTimedOut = await Promise.race([

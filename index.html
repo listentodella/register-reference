@@ -77,7 +77,7 @@
               <span id="toolsMenuBadge" class="tools-menu-badge" hidden></span>
             </button>
             <div id="toolsMenu" class="tools-menu" role="menu" aria-label="更多工具" hidden>
-              <div class="tools-menu-group">
+              <div class="tools-menu-group chip-tools-group">
                 <span class="tools-menu-heading">芯片资料</span>
                 <button id="libraryButton" class="tools-menu-item library-button" type="button" role="menuitem">
                   <i data-lucide="library-big"></i>
@@ -89,7 +89,14 @@
                   <span id="attachmentsButtonCount" class="action-count" hidden></span>
                 </button>
               </div>
-              <div class="tools-menu-group">
+              <div class="tools-menu-group debug-tools-group">
+                <span class="tools-menu-heading">调试分析</span>
+                <button id="dumpAnalyzerButton" class="tools-menu-item" type="button" role="menuitem">
+                  <i data-lucide="file-diff"></i>
+                  <span class="tools-menu-copy"><strong>转储分析</strong><small>批量解码与快照对比</small></span>
+                </button>
+              </div>
+              <div class="tools-menu-group data-tools-group">
                 <span class="tools-menu-heading">数据源</span>
                 <button id="loadYamlButton" class="tools-menu-item" type="button" role="menuitem">
                   <i data-lucide="file-plus-2"></i>
@@ -462,6 +469,64 @@
         <div class="radix-resize-handle" data-radix-resize="nw" aria-hidden="true"></div>
       </aside>
 
+      <dialog id="dumpAnalyzerDialog" class="dump-analyzer-dialog" aria-labelledby="dumpAnalyzerTitle">
+        <header class="dump-analyzer-head">
+          <div>
+            <h2 id="dumpAnalyzerTitle">转储分析</h2>
+            <p id="dumpAnalyzerChip">当前芯片</p>
+          </div>
+          <div class="dump-mode-control" role="tablist" aria-label="转储分析模式">
+            <button class="active" type="button" role="tab" data-dump-mode="single" aria-selected="true">单次分析</button>
+            <button type="button" role="tab" data-dump-mode="compare" aria-selected="false">快照对比</button>
+          </div>
+          <button id="dumpAnalyzerCloseButton" class="icon-button close-button" type="button" title="关闭转储分析" aria-label="关闭转储分析">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+
+        <div class="dump-analyzer-body">
+          <section id="dumpInputGrid" class="dump-input-grid" aria-label="寄存器转储输入">
+            <label class="dump-input-pane" data-dump-input-pane="single">
+              <span>转储内容</span>
+              <textarea id="dumpSingleInput" data-dump-input="single" spellcheck="false"
+                placeholder="REG=0x1234&#10;PAGE.REG: 0b1010&#10;0xC118 0x20"></textarea>
+            </label>
+            <label class="dump-input-pane" data-dump-input-pane="before" hidden>
+              <span>之前</span>
+              <textarea id="dumpBeforeInput" data-dump-input="before" spellcheck="false"
+                placeholder="CTRL=0x0001&#10;STATUS=0x10"></textarea>
+            </label>
+            <label class="dump-input-pane" data-dump-input-pane="after" hidden>
+              <span>之后</span>
+              <textarea id="dumpAfterInput" data-dump-input="after" spellcheck="false"
+                placeholder="STATUS=0x18&#10;CTRL=0x0003"></textarea>
+            </label>
+          </section>
+
+          <div class="dump-results-toolbar">
+            <div id="dumpStatusFilters" class="dump-status-filters" role="group" aria-label="结果状态筛选"></div>
+            <label class="dump-text-filter">
+              <i data-lucide="search"></i>
+              <input id="dumpTextFilter" type="search" spellcheck="false" placeholder="过滤寄存器、页面或位域">
+            </label>
+            <div class="dump-output-actions">
+              <button id="dumpCopyMarkdownButton" class="secondary-button" type="button">
+                <i data-lucide="copy"></i><span>复制 Markdown</span>
+              </button>
+              <button id="dumpExportJsonButton" class="primary-button" type="button">
+                <i data-lucide="file-down"></i><span>导出 JSON</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="dump-result-summary">
+            <strong id="dumpResultSummary">等待输入</strong>
+            <span id="dumpResultStatus" aria-live="polite"></span>
+          </div>
+          <div id="dumpResults" class="dump-results" aria-live="polite"></div>
+        </div>
+      </dialog>
+
       <dialog id="noteDialog" class="note-dialog" aria-labelledby="noteDialogTitle">
         <header class="note-dialog-head">
           <div>
@@ -544,6 +609,7 @@
     <script src="import-worker-inline.js"></script>
     <script src="vendor/lucide.min.js"></script>
     <script src="vendor/jsep.min.js"></script>
+    <script src="dump-analyzer.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

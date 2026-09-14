@@ -1,5 +1,6 @@
 (function () {
   const chips = Array.isArray(window.REGISTER_CHIPS) ? window.REGISTER_CHIPS : [];
+  const dumpAnalyzer = window.RegisterDumpAnalyzer;
   const THEME_STORAGE_KEY = "register-reference.theme";
   const LANGUAGE_STORAGE_KEY = "register-reference.language-mode";
   const SEARCH_RECENT_STORAGE_KEY = "register-reference.search-recent";
@@ -71,6 +72,16 @@
     calculatorHistoryIndex: 0,
     calculatorDraft: "",
     calculatorLastResult: null,
+    dumpMode: "single",
+    dumpInputs: { single: "", before: "", after: "" },
+    dumpSelections: { single: new Map(), before: new Map(), after: new Map() },
+    dumpRows: { single: [], before: [], after: [] },
+    dumpComparisons: [],
+    dumpStatusFilter: "all",
+    dumpTextFilter: "",
+    dumpExpanded: new Set(),
+    dumpStatus: "",
+    dumpStatusError: false,
     themePreference: "light",
     themeMenuOpen: false,
     toolsMenuOpen: false,
@@ -82,6 +93,7 @@
   let libraryRecords = [];
   const chipDocumentCache = new Map();
   let searchDebounceTimer = 0;
+  let dumpDebounceTimer = 0;
   let searchWorker = null;
   let searchWorkerBlobUrl = "";
   let importWorker = null;
@@ -170,6 +182,25 @@
     addAttachmentsButton: document.getElementById("addAttachmentsButton"),
     attachmentsList: document.getElementById("attachmentsList"),
     attachmentsStatus: document.getElementById("attachmentsStatus"),
+    dumpAnalyzerButton: document.getElementById("dumpAnalyzerButton"),
+    dumpAnalyzerDialog: document.getElementById("dumpAnalyzerDialog"),
+    dumpAnalyzerChip: document.getElementById("dumpAnalyzerChip"),
+    dumpAnalyzerCloseButton: document.getElementById("dumpAnalyzerCloseButton"),
+    dumpModeButtons: Array.from(document.querySelectorAll("[data-dump-mode]")),
+    dumpInputGrid: document.getElementById("dumpInputGrid"),
+    dumpInputPanes: Array.from(document.querySelectorAll("[data-dump-input-pane]")),
+    dumpInputs: {
+      single: document.getElementById("dumpSingleInput"),
+      before: document.getElementById("dumpBeforeInput"),
+      after: document.getElementById("dumpAfterInput"),
+    },
+    dumpStatusFilters: document.getElementById("dumpStatusFilters"),
+    dumpTextFilter: document.getElementById("dumpTextFilter"),
+    dumpCopyMarkdownButton: document.getElementById("dumpCopyMarkdownButton"),
+    dumpExportJsonButton: document.getElementById("dumpExportJsonButton"),
+    dumpResultSummary: document.getElementById("dumpResultSummary"),
+    dumpResultStatus: document.getElementById("dumpResultStatus"),
+    dumpResults: document.getElementById("dumpResults"),
     radixToolButton: document.getElementById("radixToolButton"),
     radixDialog: document.getElementById("radixDialog"),
     radixDialogDragHandle: document.getElementById("radixDialogDragHandle"),
@@ -1745,44 +1776,11 @@
   }
 
   function parseBits(bits) {
-    const ranges = String(bits ?? "0").split(",").map((range) => {
-      const [hiText, loText = hiText] = range.trim().split(":");
-      const hi = Number.parseInt(hiText, 10);
-      const lo = Number.parseInt(loText, 10);
-      return { hi, lo, width: hi - lo + 1 };
-    });
-    return {
-      hi: Math.max(...ranges.map((range) => range.hi)),
-      lo: Math.min(...ranges.map((range) => range.lo)),
-      width: ranges.reduce((sum, range) => sum + range.width, 0),
-      ranges,
-    };
+    return dumpAnalyzer.parseBits(bits ?? "0");
   }
 
   function parseInputValue(text) {
-    const compact = String(text || "").trim().replace(/_/g, "");
-    if (!compact) {
-      return { ok: true, value: 0n, message: "" };
-    }
-
-    try {
-      if (/^0x[0-9a-f]+$/i.test(compact)) {
-        return { ok: true, value: BigInt(compact), message: "" };
-      }
-      if (/^0b[01]+$/i.test(compact)) {
-        return { ok: true, value: BigInt(compact), message: "" };
-      }
-      if (/^[01]+b$/i.test(compact)) {
-        return { ok: true, value: BigInt(`0b${compact.slice(0, -1)}`), message: "" };
-      }
-      if (/^\d+$/.test(compact)) {
-        return { ok: true, value: BigInt(compact), message: "" };
-      }
-    } catch (error) {
-      return { ok: false, value: 0n, message: error.message };
-    }
-
-    return { ok: false, value: 0n, message: "输入值格式无效" };
+    return dumpAnalyzer.parseUnsignedValue(text, { emptyAsZero: true, maxBits: null });
   }
 
   function getRegisterValue(reg) {
@@ -2680,153 +2678,420 @@
   }
 
   function extractFieldValue(regValue, field) {
-    const { ranges } = parseBits(field.bits);
-    return ranges.reduce((result, range) => {
-      const mask = (1n << BigInt(range.width)) - 1n;
-      const segment = (regValue >> BigInt(range.lo)) & mask;
-      return (result << BigInt(range.width)) | segment;
-    }, 0n);
-  }
-
-  function numericTokenToBigInt(token, fieldWidth) {
-    const cleaned = String(token).trim();
-    if (/^0x[0-9a-f]+$/i.test(cleaned)) {
-      return BigInt(cleaned);
-    }
-    if (/^[01]+$/i.test(cleaned) && (cleaned.startsWith("0") || (cleaned.length === fieldWidth && fieldWidth <= 3))) {
-      return BigInt(`0b${cleaned}`);
-    }
-    return BigInt(Number.parseInt(cleaned, 10));
-  }
-
-  function parseVerilogNumericToken(token) {
-    const match = /^(\d+)'([bBoOdDhH])([0-9a-fA-F_xXzZ?]+)$/.exec(String(token).trim());
-    if (!match) return null;
-    const base = match[2].toLowerCase();
-    const digits = match[3].replace(/_/g, "").toLowerCase();
-    const radix = { b: 2, o: 8, d: 10, h: 16 }[base];
-    const validDigits = { b: /^[01xz?]+$/, o: /^[0-7xz?]+$/, d: /^[0-9xz?]+$/, h: /^[0-9a-fxz?]+$/ }[base];
-    if (!validDigits.test(digits)) return null;
-
-    if (!/[xz?]/.test(digits)) {
-      const prefix = { b: "0b", o: "0o", d: "", h: "0x" }[base];
-      const value = BigInt(`${prefix}${digits}`);
-      return { from: value, to: value };
-    }
-    if (base === "d") return null;
-
-    let mask = 0n;
-    let value = 0n;
-    for (const digit of digits) {
-      mask *= BigInt(radix);
-      value *= BigInt(radix);
-      if (/[xz?]/.test(digit)) continue;
-      mask += BigInt(radix - 1);
-      value += BigInt(Number.parseInt(digit, radix));
-    }
-    return { mask, match: value };
-  }
-
-  function parseInlineEnumLine(line, fieldWidth) {
-    const text = String(line || "").trim();
-    const verilogToken = "\\d+'[bBoOdDhH][0-9a-fA-F_xXzZ?]+";
-    const numericToken = `(?:${verilogToken}|0[xX][0-9a-fA-F]+|0[bB][01]+|[01]+|\\d+)`;
-    let match = new RegExp(`^(${numericToken})(?:\\s*(?:~|～|\\.\\.|-)\\s*(${numericToken}))?\\s*(?:=|:)\\s*(.+)$`).exec(text);
-    let startToken;
-    let endToken;
-    let description;
-    if (match) {
-      [, startToken, endToken, description] = match;
-    } else {
-      match = new RegExp(`^(${numericToken})\\s+-\\s+(.+)$`).exec(text);
-      if (match) {
-        [, startToken, description] = match;
-      } else {
-        // Some vendor manuals omit the delimiter, for example "8'h8 Start New Configuration".
-        match = new RegExp(`^(${verilogToken})\\s+([A-Z][A-Za-z].+)$`).exec(text);
-        if (!match) return null;
-        [, startToken, description] = match;
-      }
-    }
-
-    const parseToken = (token) => {
-      if (/^\d+'/.test(token)) return parseVerilogNumericToken(token);
-      const value = numericTokenToBigInt(token, fieldWidth);
-      return { from: value, to: value };
-    };
-    try {
-      const start = parseToken(startToken);
-      if (!start) return null;
-      if (endToken) {
-        if ("mask" in start) return null;
-        const end = parseToken(endToken);
-        if (!end || "mask" in end) return null;
-        return { from: start.from, to: end.to, label: `${startToken}..${endToken}`, desc: description.trim() };
-      }
-      return { ...start, label: startToken, desc: description.trim() };
-    } catch {
-      return null;
-    }
-  }
-
-  function parseInlineEnums(field) {
-    const desc = String(field.desc || "");
-    const { width } = parseBits(field.bits);
-    const entries = [];
-
-    for (const line of desc.split(/\r?\n/)) {
-      const entry = parseInlineEnumLine(line, width);
-      if (entry) entries.push(entry);
-    }
-
-    return entries;
+    return dumpAnalyzer.extractFieldValue(regValue, field);
   }
 
   function getFieldEnumEntries(field) {
-    const entries = [];
+    return dumpAnalyzer.getFieldEnumEntries(field);
+  }
 
-    const createEntry = (value, desc, condition = "") => {
-      const label = String(value).trim();
-      const range = label.split("..");
-      try {
-        if (range.length === 2) {
-          return { from: BigInt(range[0]), to: BigInt(range[1]), label, desc: String(desc), condition };
-        }
-        const pattern = /^0[bB]([01xX]+)$/.exec(label);
-        if (pattern && /[xX]/.test(pattern[1])) {
-          const maskText = pattern[1].replace(/[01]/g, "1").replace(/[xX]/g, "0");
-          const valueText = pattern[1].replace(/[xX]/g, "0");
-          return {
-            mask: BigInt(`0b${maskText}`),
-            match: BigInt(`0b${valueText}`),
-            label,
-            desc: String(desc),
-            condition,
-          };
-        }
-        const exact = BigInt(label);
-        return { from: exact, to: exact, label, desc: String(desc), condition };
-      } catch {
-        return null;
-      }
+  function parseInlineEnumLine(line, fieldWidth) {
+    return dumpAnalyzer.parseInlineEnumLine(line, fieldWidth);
+  }
+
+  const dumpStatusLabels = {
+    all: "全部",
+    changes: "变化",
+    matched: "成功",
+    ambiguous: "歧义",
+    unknown: "未知",
+    invalid: "非法",
+    changed: "已变化",
+    added: "新增",
+    removed: "移除",
+    unchanged: "未变化",
+  };
+
+  function setDumpStatus(message = "", isError = false) {
+    state.dumpStatus = message;
+    state.dumpStatusError = isError;
+    els.dumpResultStatus.textContent = message;
+    els.dumpResultStatus.classList.toggle("error", isError);
+  }
+
+  function dumpFilterOptions() {
+    return state.dumpMode === "compare"
+      ? ["changes", "all", "changed", "added", "removed", "ambiguous", "unknown", "invalid"]
+      : ["all", "matched", "ambiguous", "unknown", "invalid"];
+  }
+
+  function dumpStatusMatches(status) {
+    if (state.dumpStatusFilter === "all") return true;
+    if (state.dumpStatusFilter === "changes") return ["changed", "added", "removed"].includes(status);
+    return status === state.dumpStatusFilter;
+  }
+
+  function dumpRowSearchText(row) {
+    return [
+      row.identifier,
+      row.pageHint,
+      row.message,
+      row.candidate?.pageName,
+      row.candidate?.registerName,
+      row.candidate?.locator,
+      ...(row.candidates || []).flatMap((candidate) => [candidate.pageName, candidate.registerName, candidate.locator]),
+      ...(row.decoded?.fields || []).flatMap((field) => [
+        field.name,
+        field.bits,
+        field.description,
+        field.condition,
+        ...field.matches.flatMap((entry) => [entry.name, entry.desc, entry.condition]),
+      ]),
+    ].filter(Boolean).join(" ").toLocaleLowerCase("en-US");
+  }
+
+  function dumpComparisonSearchText(item) {
+    return [
+      dumpRowSearchText(item.before || {}),
+      dumpRowSearchText(item.after || {}),
+      ...item.changedFields.flatMap((field) => [field.name, field.bits]),
+    ].join(" ").toLocaleLowerCase("en-US");
+  }
+
+  function runDumpAnalysis() {
+    window.clearTimeout(dumpDebounceTimer);
+    const chip = getChip();
+    if (!chip || chip._loading || !Object.keys(getPages(chip)).length) {
+      state.dumpRows = { single: [], before: [], after: [] };
+      state.dumpComparisons = [];
+      renderDumpWorkbench();
+      return;
+    }
+    if (state.dumpMode === "single") {
+      state.dumpRows.single = dumpAnalyzer.analyzeDump(
+        state.dumpInputs.single,
+        chip,
+        state.dumpSelections.single,
+      ).rows;
+    } else {
+      state.dumpRows.before = dumpAnalyzer.analyzeDump(
+        state.dumpInputs.before,
+        chip,
+        state.dumpSelections.before,
+      ).rows;
+      state.dumpRows.after = dumpAnalyzer.analyzeDump(
+        state.dumpInputs.after,
+        chip,
+        state.dumpSelections.after,
+      ).rows;
+      state.dumpComparisons = dumpAnalyzer.compareSnapshots(state.dumpRows.before, state.dumpRows.after);
+    }
+    setDumpStatus();
+    renderDumpWorkbench();
+  }
+
+  function scheduleDumpAnalysis() {
+    window.clearTimeout(dumpDebounceTimer);
+    dumpDebounceTimer = window.setTimeout(runDumpAnalysis, 100);
+  }
+
+  function dumpCandidateSelect(row, side) {
+    if (row.status !== "ambiguous") return "";
+    return `
+      <select class="dump-candidate-select" data-dump-candidate-side="${side}" data-dump-candidate-line="${row.lineNumber}"
+        aria-label="为第 ${row.lineNumber} 行选择寄存器">
+        <option value="">选择 ${row.candidates.length} 个候选之一</option>
+        ${row.candidates.map((candidate) => `
+          <option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.pageName)} · ${escapeHtml(candidate.registerName)} · ${escapeHtml(candidate.locator)}</option>
+        `).join("")}
+      </select>
+    `;
+  }
+
+  function dumpFieldMeaningMarkup(field, register, pageName) {
+    if (field.enumStatus === "invalid_field") return `<span class="muted">${escapeHtml(field.message || "位域定义无效")}</span>`;
+    const translation = getFieldTranslation(field.source, register, pageName);
+    const semantic = field.semanticStatus !== "normal"
+      ? `<span class="dump-field-state ${escapeHtml(field.semanticStatus)}">${field.semanticStatus === "reserved" ? "reserved" : "conditional"}</span>`
+      : "";
+    const enumState = `<span class="dump-field-state ${escapeHtml(field.enumStatus)}">${
+      field.enumStatus === "matched" ? "枚举匹配" : field.enumStatus === "unknown_value" ? "未知枚举" : "未定义枚举"
+    }</span>`;
+    let meaning = "";
+    if (field.matches.length) {
+      meaning = field.matches.map((entry) => {
+        const translated = getValueTranslation(translation, entry.label, entry.condition);
+        const source = [entry.name, entry.desc].filter(Boolean).join(": ") || entry.label;
+        const localized = translated ? [entry.name, translated.desc].filter(Boolean).join(": ") : "";
+        const condition = entry.condition || translated?.condition
+          ? `<div class="field-condition"><i data-lucide="git-branch"></i><span>${renderLocalizedText(entry.condition, translated?.condition, "localized-inline")}</span></div>`
+          : "";
+        return `<div><strong>${renderLocalizedText(source, localized, "localized-inline")}</strong>${condition}</div>`;
+      }).join("");
+    } else if (field.enumStatus === "unknown_value") {
+      meaning = `<span class="muted">资料未定义当前值</span>`;
+    } else if (field.semanticStatus === "reserved") {
+      meaning = `<strong>${escapeHtml(field.reserved || "reserved")}</strong>`;
+    } else {
+      const source = stripEnumLines(field.source);
+      meaning = source || translation?.desc
+        ? renderLocalizedText(source, translation?.desc, "localized-inline")
+        : `<span class="muted">资料未提供枚举或说明</span>`;
+    }
+    const condition = field.condition && !field.matches.some((entry) => entry.condition)
+      ? `<div class="field-condition"><i data-lucide="git-branch"></i><span>${renderLocalizedText(field.condition, translation?.condition, "localized-inline")}</span></div>`
+      : "";
+    return `${semantic}${enumState}${meaning}${condition}`;
+  }
+
+  function renderDumpFieldRows(row, fields = row.decoded?.fields || [], changed = false) {
+    if (!fields.length) return `<div class="dump-empty-state">该寄存器没有位域定义</div>`;
+    return `<div class="dump-field-details">${fields.map((field) => `
+      <div class="dump-field-detail ${changed ? "changed-field" : ""}">
+        <div class="dump-field-name">${escapeHtml(field.name)}<div class="dump-field-access">${escapeHtml(field.access || "")}</div></div>
+        <div class="dump-field-bits">[${escapeHtml(field.bits)}]</div>
+        <div class="dump-field-value">${escapeHtml(field.valueHex)} / ${escapeHtml(field.valueDec)}</div>
+        <div class="dump-field-meaning">${dumpFieldMeaningMarkup(field, row.register, row.candidate.pageName)}</div>
+      </div>
+    `).join("")}</div>`;
+  }
+
+  function dumpRowEntity(row, side) {
+    if (row.candidate) {
+      return `
+        <button class="dump-register-link" type="button" data-dump-open-side="${side}" data-dump-open-line="${row.lineNumber}">
+          ${escapeHtml(row.candidate.registerName)}
+        </button>
+        <div class="dump-location">${escapeHtml(row.candidate.pageName)} · ${escapeHtml(row.candidate.locator)}</div>
+      `;
+    }
+    return `${dumpCandidateSelect(row, side)}${row.message ? `<div class="dump-message">${escapeHtml(row.message)}</div>` : ""}`;
+  }
+
+  function renderDumpSingleRow(row) {
+    const key = `single:${row.lineNumber}`;
+    const expanded = state.dumpExpanded.has(key);
+    const canExpand = Boolean(row.decoded?.fields.length);
+    return `
+      <tr class="dump-result-row" data-dump-status="${escapeHtml(row.status)}">
+        <td class="dump-col-line">${row.lineNumber}</td>
+        <td class="dump-col-status"><span class="dump-status ${escapeHtml(row.status)}">${dumpStatusLabels[row.status] || row.status}</span></td>
+        <td class="dump-col-input"><div class="dump-identifier">${escapeHtml(row.identifier || row.content)}</div></td>
+        <td>${dumpRowEntity(row, "single")}</td>
+        <td class="dump-col-value dump-value">${escapeHtml(row.decoded?.valueHex || row.valueText || "-")}${row.decoded?.clipped ? `<div class="dump-message">已截取低 ${row.decoded.bitWidth} bit</div>` : ""}</td>
+        <td>${row.decoded ? `${row.decoded.fields.length} 个位域` : escapeHtml(row.message || "-")}</td>
+        <td class="dump-col-action">${canExpand ? `
+          <button class="dump-expand-button" type="button" data-dump-expand="${escapeHtml(key)}" aria-expanded="${expanded}" title="展开位域" aria-label="展开第 ${row.lineNumber} 行位域">
+            <i data-lucide="chevron-down"></i>
+          </button>
+        ` : ""}</td>
+      </tr>
+      ${expanded ? `<tr class="dump-detail-row"><td colspan="7">${renderDumpFieldRows(row)}</td></tr>` : ""}
+    `;
+  }
+
+  function comparisonKey(item, index) {
+    const row = item.after || item.before;
+    return `compare:${item.stableId || `${item.status}:${row?.lineNumber || index}`}`;
+  }
+
+  function comparisonChangedFields(item) {
+    return item.changedFields.map((change) => {
+      const row = item.after || item.before;
+      const before = change.before;
+      const after = change.after;
+      return `
+        <div class="dump-field-detail changed-field">
+          <div class="dump-field-name">${escapeHtml(change.name)}<div class="dump-field-access">[${escapeHtml(change.bits)}]</div></div>
+          <div class="dump-field-value">${escapeHtml(before?.valueHex || "-")}</div>
+          <div class="dump-field-value">${escapeHtml(after?.valueHex || "-")}</div>
+          <div class="dump-field-meaning">
+            ${before ? `<div><strong>之前：</strong>${dumpFieldMeaningMarkup(before, item.before.register, item.before.candidate.pageName)}</div>` : ""}
+            ${after ? `<div><strong>之后：</strong>${dumpFieldMeaningMarkup(after, item.after.register, item.after.candidate.pageName)}</div>` : ""}
+          </div>
+        </div>
+      `;
+    }).join("") || `<div class="dump-empty-state">数值变化未落入已定义位域</div>`;
+  }
+
+  function renderDumpComparisonRow(item, index) {
+    const row = item.after || item.before;
+    const side = item.after ? "after" : "before";
+    const key = comparisonKey(item, index);
+    const expanded = state.dumpExpanded.has(key);
+    const fields = row?.decoded?.fields || [];
+    const canExpand = item.status === "changed" ? true : fields.length > 0;
+    const summary = item.status === "changed"
+      ? `${item.changedFields.length} 个位域变化`
+      : item.status === "added" ? "仅之后存在"
+        : item.status === "removed" ? "仅之前存在"
+          : item.status === "unchanged" ? "值一致"
+            : row?.message || "需要处理后再比较";
+    let details = "";
+    if (expanded) {
+      if (item.status === "changed") details = `<div class="dump-field-details">${comparisonChangedFields(item)}</div>`;
+      else details = renderDumpFieldRows(row, fields);
+    }
+    return `
+      <tr class="dump-result-row" data-dump-status="${escapeHtml(item.status)}">
+        <td class="dump-col-status"><span class="dump-status ${escapeHtml(item.status)}">${dumpStatusLabels[item.status] || item.status}</span></td>
+        <td>${row ? dumpRowEntity(row, side) : "-"}</td>
+        <td class="dump-location">${row?.candidate ? `${escapeHtml(row.candidate.pageName)} · ${escapeHtml(row.candidate.locator)}` : escapeHtml(row?.identifier || "-")}</td>
+        <td class="dump-col-value dump-value">${escapeHtml(item.before?.decoded?.valueHex || item.before?.valueText || "-")}</td>
+        <td class="dump-col-value dump-value">${escapeHtml(item.after?.decoded?.valueHex || item.after?.valueText || "-")}</td>
+        <td><div class="dump-change-summary">${escapeHtml(summary)}</div></td>
+        <td class="dump-col-action">${canExpand ? `
+          <button class="dump-expand-button" type="button" data-dump-expand="${escapeHtml(key)}" aria-expanded="${expanded}" title="展开差异" aria-label="展开寄存器差异">
+            <i data-lucide="chevron-down"></i>
+          </button>
+        ` : ""}</td>
+      </tr>
+      ${expanded ? `<tr class="dump-detail-row"><td colspan="7">${details}</td></tr>` : ""}
+    `;
+  }
+
+  function renderDumpFilters(items) {
+    const counts = items.reduce((result, item) => {
+      result[item.status] = (result[item.status] || 0) + 1;
+      return result;
+    }, {});
+    els.dumpStatusFilters.innerHTML = dumpFilterOptions().map((filter) => {
+      const count = filter === "all"
+        ? items.length
+        : filter === "changes"
+          ? (counts.changed || 0) + (counts.added || 0) + (counts.removed || 0)
+          : counts[filter] || 0;
+      return `<button class="${state.dumpStatusFilter === filter ? "active" : ""}" type="button" data-dump-filter="${filter}" aria-pressed="${state.dumpStatusFilter === filter}">${dumpStatusLabels[filter]} ${count}</button>`;
+    }).join("");
+  }
+
+  function renderDumpWorkbench() {
+    const chip = getChip();
+    els.dumpAnalyzerChip.textContent = chip ? `${chip.sensor || "未知芯片"} · 全部页面` : "尚未选择芯片";
+    els.dumpModeButtons.forEach((button) => {
+      const active = button.dataset.dumpMode === state.dumpMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    els.dumpInputGrid.classList.toggle("single", state.dumpMode === "single");
+    els.dumpInputPanes.forEach((pane) => {
+      pane.hidden = state.dumpMode === "single"
+        ? pane.dataset.dumpInputPane !== "single"
+        : pane.dataset.dumpInputPane === "single";
+    });
+    Object.entries(els.dumpInputs).forEach(([side, input]) => {
+      if (input.value !== state.dumpInputs[side]) input.value = state.dumpInputs[side];
+    });
+    els.dumpTextFilter.value = state.dumpTextFilter;
+
+    const query = state.dumpTextFilter.trim().toLocaleLowerCase("en-US");
+    if (state.dumpMode === "single") {
+      const items = state.dumpRows.single;
+      renderDumpFilters(items);
+      const visible = items.filter((row) => dumpStatusMatches(row.status) && (!query || dumpRowSearchText(row).includes(query)));
+      els.dumpResultSummary.textContent = items.length
+        ? `已解析 ${items.length} 行 · 显示 ${visible.length} 行`
+        : "等待输入";
+      els.dumpResults.innerHTML = visible.length ? `
+        <table class="dump-result-table">
+          <thead><tr><th class="dump-col-line">行</th><th class="dump-col-status">状态</th><th class="dump-col-input">输入标识</th><th>匹配寄存器</th><th class="dump-col-value">值</th><th>位域摘要</th><th class="dump-col-action"></th></tr></thead>
+          <tbody>${visible.map(renderDumpSingleRow).join("")}</tbody>
+        </table>
+      ` : `<div class="dump-empty-state">${items.length ? "当前筛选没有结果" : "粘贴寄存器转储后将自动匹配当前芯片的全部页面"}</div>`;
+    } else {
+      const items = state.dumpComparisons;
+      renderDumpFilters(items);
+      const indexed = items.map((item, index) => ({ item, index }));
+      const visible = indexed.filter(({ item }) => dumpStatusMatches(item.status) && (!query || dumpComparisonSearchText(item).includes(query)));
+      els.dumpResultSummary.textContent = items.length
+        ? `已对齐 ${items.length} 项 · 显示 ${visible.length} 项`
+        : "等待两份快照";
+      els.dumpResults.innerHTML = visible.length ? `
+        <table class="dump-result-table compare">
+          <thead><tr><th class="dump-col-status">状态</th><th>寄存器</th><th>稳定定位</th><th class="dump-col-value">之前</th><th class="dump-col-value">之后</th><th>变化摘要</th><th class="dump-col-action"></th></tr></thead>
+          <tbody>${visible.map(({ item, index }) => renderDumpComparisonRow(item, index)).join("")}</tbody>
+        </table>
+      ` : `<div class="dump-empty-state">${items.length ? "当前筛选没有结果" : "分别粘贴之前和之后的快照，输入顺序不会影响对齐"}</div>`;
+    }
+    els.dumpCopyMarkdownButton.disabled = state.dumpMode === "single" ? !state.dumpRows.single.length : !state.dumpComparisons.length;
+    els.dumpExportJsonButton.disabled = els.dumpCopyMarkdownButton.disabled;
+    els.dumpResultStatus.textContent = state.dumpStatus;
+    els.dumpResultStatus.classList.toggle("error", state.dumpStatusError);
+    refreshIcons(els.dumpAnalyzerDialog);
+  }
+
+  function setDumpMode(mode) {
+    if (!["single", "compare"].includes(mode) || mode === state.dumpMode) return;
+    state.dumpMode = mode;
+    state.dumpStatusFilter = mode === "compare" ? "changes" : "all";
+    state.dumpExpanded.clear();
+    runDumpAnalysis();
+    window.requestAnimationFrame(() => (mode === "single" ? els.dumpInputs.single : els.dumpInputs.before).focus());
+  }
+
+  function openDumpAnalyzer() {
+    closeToolsMenu(false);
+    renderDumpWorkbench();
+    if (!els.dumpAnalyzerDialog.open) els.dumpAnalyzerDialog.showModal();
+    window.requestAnimationFrame(() => (state.dumpMode === "single" ? els.dumpInputs.single : els.dumpInputs.before).focus());
+  }
+
+  function closeDumpAnalyzer() {
+    if (els.dumpAnalyzerDialog.open) els.dumpAnalyzerDialog.close();
+  }
+
+  function dumpRowForSide(side, lineNumber) {
+    return (state.dumpRows[side] || []).find((row) => row.lineNumber === Number(lineNumber)) || null;
+  }
+
+  function openDumpRegister(side, lineNumber) {
+    const row = dumpRowForSide(side, lineNumber);
+    if (!row?.candidate) return;
+    closeDumpAnalyzer();
+    state.pageName = row.candidate.pageName;
+    state.view = "table";
+    state.query = "";
+    populatePageSelect();
+    render();
+    const result = {
+      chipId: getNavigationChipId(),
+      pageName: row.candidate.pageName,
+      registerIndex: row.candidate.registerIndex,
+      registerName: row.candidate.registerName,
+      registerLocator: row.candidate.locator,
     };
+    const reg = getRegisterForSearchResult(result);
+    const key = reg ? getRegisterKey(reg) : "";
+    const anchor = Array.from(els.tableBody.querySelectorAll("tr[data-register-key]")).find((element) => element.dataset.registerKey === key) || null;
+    anchor?.scrollIntoView({ block: "center" });
+    // The dialog closes during this click, so the document-level click handler would hide the panel
+    // again. Defer opening it to the next frame, matching openSearchResult.
+    window.requestAnimationFrame(() => {
+      showRegisterWorkbench(result, anchor)
+        .then(() => els.hoverPanel.querySelector(".hover-close")?.focus({ preventScroll: true }))
+        .catch((error) => {
+          state.loadMessage = `详情加载失败：${errorMessage(error)}`;
+          render();
+        });
+    });
+  }
 
-    if (field.values && !Array.isArray(field.values) && typeof field.values === "object") {
-      for (const [key, desc] of Object.entries(field.values)) {
-        const entry = createEntry(key, desc);
-        if (entry) entries.push(entry);
-      }
+  function activeDumpPayload() {
+    return state.dumpMode === "compare" ? state.dumpComparisons : state.dumpRows.single;
+  }
+
+  async function copyDumpMarkdown() {
+    const markdown = dumpAnalyzer.createMarkdown(getChip(), state.dumpMode, activeDumpPayload());
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setDumpStatus("Markdown 已复制");
+    } catch (_error) {
+      setDumpStatus("当前环境不允许写入剪贴板", true);
     }
+  }
 
-    if (Array.isArray(field.values)) {
-      for (const item of field.values) {
-        const entry = createEntry(item.value, item.desc ?? item.name ?? item.value, item.condition || "");
-        if (entry) entries.push(entry);
-      }
-    }
-
-    entries.push(...parseInlineEnums(field));
-    return entries;
+  function exportDumpJson() {
+    const exportDocument = dumpAnalyzer.createExportDocument(getChip(), state.dumpMode, activeDumpPayload());
+    const blobUrl = URL.createObjectURL(new Blob([`${JSON.stringify(exportDocument, null, 2)}\n`], { type: "application/json" }));
+    const link = window.document.createElement("a");
+    link.href = blobUrl;
+    link.download = `${chipId(getChip()?.sensor, "register")}-${state.dumpMode === "compare" ? "snapshot-diff" : "dump-analysis"}.json`;
+    window.document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+    setDumpStatus("JSON 已导出");
   }
 
   function getStructuredEnum(field, value, fieldTranslation = null, entries = getFieldEnumEntries(field)) {
@@ -5170,6 +5435,61 @@
       event.preventDefault();
       closeAttachmentsDialog();
     });
+    els.dumpAnalyzerButton.addEventListener("click", openDumpAnalyzer);
+    els.dumpAnalyzerCloseButton.addEventListener("click", closeDumpAnalyzer);
+    els.dumpAnalyzerDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeDumpAnalyzer();
+    });
+    els.dumpModeButtons.forEach((button) => {
+      button.addEventListener("click", () => setDumpMode(button.dataset.dumpMode));
+    });
+    Object.entries(els.dumpInputs).forEach(([side, input]) => {
+      input.addEventListener("input", () => {
+        state.dumpInputs[side] = input.value;
+        setDumpStatus();
+        scheduleDumpAnalysis();
+      });
+      input.addEventListener("keydown", (event) => {
+        if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+        event.preventDefault();
+        runDumpAnalysis();
+      });
+    });
+    els.dumpStatusFilters.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-dump-filter]");
+      if (!button) return;
+      state.dumpStatusFilter = button.dataset.dumpFilter;
+      renderDumpWorkbench();
+    });
+    els.dumpTextFilter.addEventListener("input", () => {
+      state.dumpTextFilter = els.dumpTextFilter.value;
+      renderDumpWorkbench();
+      els.dumpTextFilter.focus();
+    });
+    els.dumpResults.addEventListener("change", (event) => {
+      const select = event.target.closest("[data-dump-candidate-side]");
+      if (!select) return;
+      const side = select.dataset.dumpCandidateSide;
+      const lineNumber = Number(select.dataset.dumpCandidateLine);
+      if (select.value) state.dumpSelections[side].set(lineNumber, select.value);
+      else state.dumpSelections[side].delete(lineNumber);
+      runDumpAnalysis();
+    });
+    els.dumpResults.addEventListener("click", (event) => {
+      const expand = event.target.closest("[data-dump-expand]");
+      if (expand) {
+        const key = expand.dataset.dumpExpand;
+        if (state.dumpExpanded.has(key)) state.dumpExpanded.delete(key);
+        else state.dumpExpanded.add(key);
+        renderDumpWorkbench();
+        return;
+      }
+      const open = event.target.closest("[data-dump-open-side]");
+      if (open) openDumpRegister(open.dataset.dumpOpenSide, Number(open.dataset.dumpOpenLine));
+    });
+    els.dumpCopyMarkdownButton.addEventListener("click", copyDumpMarkdown);
+    els.dumpExportJsonButton.addEventListener("click", exportDumpJson);
     els.radixToolButton.addEventListener("click", openRadixDialog);
     els.radixDialogCloseButton.addEventListener("click", closeRadixDialog);
     els.radixDialogDragHandle.addEventListener("pointerdown", startRadixDrag);
@@ -5386,6 +5706,7 @@
       } catch (_error) {
         // The loader has already placed the actionable message in the status band.
       }
+      if (els.dumpAnalyzerDialog.open) runDumpAnalysis();
       refreshBrowserSearchIndex();
     });
 
@@ -5463,6 +5784,7 @@
       populateChipSelect();
       populatePageSelect();
       render();
+      if (els.dumpAnalyzerDialog.open) renderDumpWorkbench();
     });
 
     els.viewButtons.forEach((button) => {
