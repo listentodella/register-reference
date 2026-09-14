@@ -63,14 +63,27 @@ Page({
     this.measureComposer();
   },
 
-  measureComposer() {
+  onResize() {
+    this.measureComposer();
+  },
+
+  /**
+   * 测量实际渲染尺寸。不能只用 rpx 换算：WXSS 对 rpx 转换会取整，64 列累积后偏差可达数个 bit，
+   * 会让拖动划分落到错误的位上。因此以真实渲染宽度为准，rpx 换算值仅作为测量完成前的兜底。
+   */
+  measureComposer(callback) {
     wx.createSelectorQuery()
       .in(this)
       .select(".composer-inner")
-      .boundingClientRect((rect) => {
-        if (rect) this.composerLeft = rect.left;
-      })
-      .exec();
+      .boundingClientRect()
+      .select(".bit-cell")
+      .boundingClientRect()
+      .exec((results) => {
+        const [inner, cell] = results || [];
+        if (inner && typeof inner.left === "number") this.composerLeft = inner.left;
+        if (cell && cell.width) this.columnPx = cell.width;
+        if (typeof callback === "function") callback();
+      });
   },
 
   render(extra = {}) {
@@ -180,6 +193,7 @@ Page({
     this.setData({ bitWidth, activeFieldKey: "", maxShift: bitWidth, shiftLeft: Math.min(this.data.shiftLeft, bitWidth), shiftRight: Math.min(this.data.shiftRight, bitWidth) });
     this.setStatus("");
     this.render();
+    this.measureComposer();
   },
 
   onSignedChange(event) {

@@ -13,15 +13,34 @@ const root = resolve(import.meta.dirname, "..");
 global.wx = {
   getWindowInfo: () => ({ windowWidth: 375 }),
   getSystemInfoSync: () => ({ windowWidth: 375, theme: "light" }),
-  createSelectorQuery: () => ({
-    in: () => ({
-      select: () => ({
-        boundingClientRect: (callback) => ({
-          exec: () => callback({ left: 0, top: 0, width: 750, height: 400 }),
-        }),
-      }),
-    }),
-  }),
+  // 模拟 createSelectorQuery 的链式调用：select().boundingClientRect().select().boundingClientRect().exec(cb)
+  createSelectorQuery: () => {
+    const pending = [];
+    const query = {
+      in() {
+        return this;
+      },
+      select(selector) {
+        this.selector = selector;
+        return this;
+      },
+      boundingClientRect() {
+        pending.push(this.selector);
+        return this;
+      },
+      exec(callback) {
+        // 故意让位宽实测值（24）不等于 rpx 换算值（44 * 375 / 750 = 22），以证明代码采用了实测值
+        callback(
+          pending.map((selector) =>
+            selector === ".bit-cell"
+              ? { left: 0, top: 0, width: 24, height: 52 }
+              : { left: 0, top: 0, width: 750, height: 400 },
+          ),
+        );
+      },
+    };
+    return query;
+  },
 };
 
 let captured = null;
@@ -61,6 +80,13 @@ assert.equal(page.data.fields[0].range, "31:0");
 assert.equal(page.data.bytes.length, 4);
 assert.equal(page.data.trackWidth, 32 * 44);
 console.log("init: 默认 32 bit，单个位域，字节与位行长度正确");
+
+// 测量完成前用 rpx 换算兜底；onReady 之后必须切换到实测值，否则 64 列会累积取整误差。
+assert.equal(page.columnPx, 44 * (375 / 750), "测量前应使用 rpx 换算值兜底");
+page.onReady();
+assert.equal(page.columnPx, 24, "列宽应以实测渲染宽度为准，而不是 rpx 换算值");
+assert.equal(page.composerLeft, 0);
+console.log("measure: 列宽以实测渲染宽度为准（rpx 换算值仅兜底）");
 
 /* ---------- 数值输入与格式回填 ---------- */
 
@@ -138,7 +164,8 @@ console.log("operations: 位翻转、取反、自增回绕、移位与夹取通�
 page.onBitIndexStart(tap({ bitIndex: 7 }));
 assert.deepEqual(page.selection, { start: 7, end: 7 });
 
-// columnPx = 44 * (375 / 750) = 22。x=30 落在第 2 列（bit 6），x=77 落在第 4 列（bit 4）。
+// columnPx = 24（实测）。bit 7→列 0、bit 6→列 1、bit 5→列 2、bit 4→列 3。
+// 因此 x=30 落在 bit 6，x=77 落在 bit 4。
 page.onBitIndexMove(touch(30));
 assert.equal(page.selection.end, 6, "x=30 应对应 bit 6");
 page.onBitIndexMove(touch(77));
@@ -153,7 +180,7 @@ assert.equal(page.selection, null);
 console.log("fields: 拖动位号划定位域通过");
 
 page.onBitIndexStart(tap({ bitIndex: 5 }));
-page.onBitIndexMove(touch(70));
+page.onBitIndexMove(touch(77));
 page.onBitIndexEnd();
 assert.deepEqual(
   page.data.fields.map((item) => item.range),
