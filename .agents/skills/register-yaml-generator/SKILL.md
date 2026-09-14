@@ -128,3 +128,12 @@ node .agents/skills/register-yaml-generator/scripts/check-browser-yaml.js riscv-
 ## 维护现有文件
 
 仅修改有可靠来源支持的部分。新增或调整寄存器后重新验证整个文件，因为 `width`、地址重叠和分页变化会影响其他条目。若新增 schema 字段，先确认前端或下游工具会消费该字段，再更新 [references/schema.md](references/schema.md) 和校验脚本。
+
+改动校验规则时必须同步维护共享夹具。`tools/validator-fixtures/valid` 与 `invalid` 下的文件由 Rust（`src-tauri/src/validation.rs` 的 `fixture_tests`）和 JavaScript（`tools/test-validator-parity.mjs`）两侧同时校验，两侧的“通过”定义都是 0 error 且 0 warning：
+
+```bash
+npm run test:validator
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+```
+
+新增或调整规则后，先补一份能体现该规则的夹具，再让两侧都通过；只改一侧会让两个测试互相矛盾。注意 `bits` 只有写成未加引号的纯数字（例如 `bits: 0`）才会被判定为非字符串，`bits: 7:4` 不加引号在两侧都会被解析成字符串并接受。
