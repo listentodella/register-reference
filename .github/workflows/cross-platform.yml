@@ -79,6 +79,15 @@ jobs:
       - name: Test ARM register importers
         run: npm run test:arm-import
 
+      - name: Test RISC-V register importer
+        run: npm run test:riscv-import
+
+      - name: Test dump analyzer
+        run: npm run test:dump
+
+      - name: Test search worker
+        run: npm run test:search
+
       - name: Test web interface
         run: npm run test:web
 
