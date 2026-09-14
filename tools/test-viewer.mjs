@@ -1878,6 +1878,25 @@ pages:
   await dumpPage.locator('#dumpStatusFilters [data-dump-filter="changes"]').click();
   await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 3);
 
+  await dumpPage.setViewportSize({ width: 768, height: 900 });
+  await dumpPage.waitForFunction(() => document.querySelector("#dumpAnalyzerDialog").open);
+  assert.equal(
+    await dumpPage.evaluate(() => {
+      const dialog = document.querySelector("#dumpAnalyzerDialog");
+      const body = document.querySelector(".dump-analyzer-body");
+      const toolbar = document.querySelector(".dump-results-toolbar");
+      return (
+        document.documentElement.scrollWidth <= window.innerWidth &&
+        dialog.scrollWidth <= dialog.clientWidth &&
+        body.scrollWidth <= body.clientWidth &&
+        toolbar.scrollWidth <= toolbar.clientWidth
+      );
+    }),
+    true,
+    "the dump workbench must wrap its toolbar instead of clipping it on narrow desktop widths",
+  );
+  await dumpPage.setViewportSize({ width: 1280, height: 900 });
+
   await dumpPage.locator('[data-dump-mode="single"]').click();
   await dumpPage.waitForFunction(() => document.querySelectorAll("#dumpResults .dump-result-row").length === 5);
   await dumpPage.locator('#dumpResults [data-dump-open-side="single"]').first().click();
