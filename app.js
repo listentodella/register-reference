@@ -4948,7 +4948,6 @@
 
     let selectedIndex = state.chipIndex;
     let selectedSourceSha256 = "";
-    let desktopRecords = null;
     let loaded = 0;
     let translated = 0;
 
@@ -4958,41 +4957,33 @@
         const chip = normalizeLoadedChip(item.data, item.sourceName);
         chip._sourceSha256 = sourceSha256;
         selectedSourceSha256 = sourceSha256;
-        if (isDesktopApp()) {
-          desktopRecords = await getInvoke()("import_yaml", {
-            sourceName: item.sourceName,
-            yamlText: item.text,
-            category: null,
-          });
-        } else {
-          selectedIndex = upsertChip(chip);
-          const existingRecord = libraryRecords.findIndex((record) => record.id === chip._id);
-          const previous = existingRecord >= 0 ? libraryRecords[existingRecord] : null;
-          const record = {
-            id: chip._id,
-            sensor: chip.sensor || chip._id,
-            vendor: chip.vendor || "",
-            family: chip.family || "",
-            deviceType: chip.device_type || "",
-            category: chip._category || fallbackCategory({ deviceType: chip.device_type }),
-            enabled: true,
-            builtin: false,
-            sourceKind: "imported",
-            sourceName: item.sourceName,
-            sourcePath: null,
-            sourceSha256,
-            yamlText: item.text,
-            notes: previous?.notes || [],
-            attachments: previous?.attachments || [],
-            translations: (previous?.translations || []).filter((translation) => {
-              return translation.sourceSha256 === sourceSha256
-                || translationDocumentFromRecord(translation)?.source_sha256 === sourceSha256;
-            }),
-            chipData: chip,
-          };
-          if (existingRecord >= 0) libraryRecords[existingRecord] = record;
-          else libraryRecords.push(record);
-        }
+        selectedIndex = upsertChip(chip);
+        const existingRecord = libraryRecords.findIndex((record) => record.id === chip._id);
+        const previous = existingRecord >= 0 ? libraryRecords[existingRecord] : null;
+        const record = {
+          id: chip._id,
+          sensor: chip.sensor || chip._id,
+          vendor: chip.vendor || "",
+          family: chip.family || "",
+          deviceType: chip.device_type || "",
+          category: chip._category || fallbackCategory({ deviceType: chip.device_type }),
+          enabled: true,
+          builtin: false,
+          sourceKind: "imported",
+          sourceName: item.sourceName,
+          sourcePath: null,
+          sourceSha256,
+          yamlText: item.text,
+          notes: previous?.notes || [],
+          attachments: previous?.attachments || [],
+          translations: (previous?.translations || []).filter((translation) => {
+            return translation.sourceSha256 === sourceSha256
+              || translationDocumentFromRecord(translation)?.source_sha256 === sourceSha256;
+          }),
+          chipData: chip,
+        };
+        if (existingRecord >= 0) libraryRecords[existingRecord] = record;
+        else libraryRecords.push(record);
         loaded += 1;
       } catch (error) {
         failures.push(`${item.fileName}: ${errorMessage(error)}`);
@@ -5003,29 +4994,22 @@
       try {
         const sourceSha256 = item.sourceSha256;
         selectedSourceSha256 = sourceSha256;
-        if (isDesktopApp()) {
-          desktopRecords = await getInvoke()("import_translation", {
-            sourceName: item.sourceName,
-            yamlText: item.text,
+        const chip = chips.find((candidate) => candidate._sourceSha256 === sourceSha256);
+        if (!chip) throw new Error("英文源 YAML 当前未显示");
+        chip._translations = (chip._translations || []).filter((translation) => translation.locale !== item.data.locale);
+        chip._translations.push(item.data);
+        const record = libraryRecords.find((candidate) => candidate.sourceSha256 === sourceSha256);
+        if (record) {
+          record.translations = (record.translations || []).filter((translation) => {
+            return translationDocumentFromRecord(translation)?.locale !== item.data.locale;
           });
-        } else {
-          const chip = chips.find((candidate) => candidate._sourceSha256 === sourceSha256);
-          if (!chip) throw new Error("英文源 YAML 当前未显示");
-          chip._translations = (chip._translations || []).filter((translation) => translation.locale !== item.data.locale);
-          chip._translations.push(item.data);
-          const record = libraryRecords.find((candidate) => candidate.sourceSha256 === sourceSha256);
-          if (record) {
-            record.translations = (record.translations || []).filter((translation) => {
-              return translationDocumentFromRecord(translation)?.locale !== item.data.locale;
-            });
-            record.translations.push({
-              sourceSha256,
-              sourceFile: item.data.source_file,
-              locale: item.data.locale,
-              yamlText: item.text,
-              translationData: item.data,
-            });
-          }
+          record.translations.push({
+            sourceSha256,
+            sourceFile: item.data.source_file,
+            locale: item.data.locale,
+            yamlText: item.text,
+            translationData: item.data,
+          });
         }
         translated += 1;
       } catch (error) {
@@ -5033,7 +5017,6 @@
       }
     }
 
-    if (desktopRecords) applyLibraryRecords(desktopRecords);
     if (selectedSourceSha256) {
       const importedIndex = chips.findIndex((chip) => chip._sourceSha256 === selectedSourceSha256);
       state.chipIndex = importedIndex >= 0 ? importedIndex : selectedIndex;
