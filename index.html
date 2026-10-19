@@ -19,10 +19,39 @@
         </div>
 
         <div class="toolbar" aria-label="寄存器筛选">
-          <label class="control">
-            <span>芯片</span>
-            <select id="chipSelect"></select>
-          </label>
+          <div class="control chip-control">
+            <span id="chipControlLabel">芯片</span>
+            <div id="chipPicker" class="chip-picker">
+              <button id="chipPickerButton" class="chip-picker-button" type="button"
+                aria-haspopup="listbox" aria-expanded="false" aria-controls="chipPickerPanel"
+                aria-labelledby="chipControlLabel chipPickerButtonLabel">
+                <span id="chipPickerButtonLabel" class="chip-picker-value">尚未导入芯片</span>
+                <i data-lucide="chevrons-up-down" class="chip-picker-caret"></i>
+              </button>
+              <div id="chipPickerPanel" class="chip-picker-panel" hidden>
+                <div class="chip-picker-search">
+                  <i data-lucide="search"></i>
+                  <input id="chipPickerSearch" type="search" spellcheck="false" autocomplete="off"
+                    placeholder="搜索芯片、分类或厂商" aria-label="搜索芯片"
+                    aria-controls="chipPickerList">
+                  <button id="chipPickerSearchClear" class="chip-picker-search-clear" type="button"
+                    title="清除搜索" aria-label="清除搜索" hidden>
+                    <i data-lucide="x"></i>
+                  </button>
+                </div>
+                <div class="chip-picker-bulk">
+                  <button id="chipPickerExpandAll" class="chip-picker-link" type="button">展开全部</button>
+                  <button id="chipPickerCollapseAll" class="chip-picker-link" type="button">全部折叠</button>
+                </div>
+                <div id="chipPickerList" class="chip-picker-list" role="listbox" aria-label="芯片列表"></div>
+                <div class="chip-picker-foot">
+                  <span id="chipPickerSummary">尚未导入芯片</span>
+                  <span class="chip-picker-hints"><kbd>↑↓</kbd><kbd>←→</kbd><kbd>Enter</kbd><kbd>Esc</kbd></span>
+                </div>
+              </div>
+            </div>
+            <select id="chipSelect" class="visually-hidden" tabindex="-1" aria-hidden="true"></select>
+          </div>
           <button id="libraryQuickButton" class="icon-button library-quick-button" type="button"
             title="管理芯片库" aria-label="管理芯片库" aria-controls="libraryPanel" aria-expanded="false">
             <i data-lucide="library-big"></i>

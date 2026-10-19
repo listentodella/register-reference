@@ -2,6 +2,10 @@
   color-scheme: light;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Cascadia Mono", "Liberation Mono", monospace;
+  /* 顶栏高度由 JS 实测写入；此默认值仅用于脚本尚未执行的首次绘制。 */
+  --topbar-height: 85px;
+  /* 视图标题高度由 JS 实测写入；默认值仅用于脚本执行前的首次绘制。 */
+  --section-head-height: 66px;
   --bg: #f4f6f7;
   --panel: #ffffff;
   --panel-soft: #f8faf9;
@@ -414,6 +418,369 @@ h2 {
   position: relative;
   flex-basis: 200px;
   width: min(240px, 22vw);
+}
+
+/* 视觉隐藏但保留在 DOM 中：芯片选择器仍是原生 select，供脚本与辅助技术读取。 */
+.visually-hidden,
+.control .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  border: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.chip-control {
+  flex: 0 1 160px;
+  width: 160px;
+  min-width: 116px;
+}
+
+/* grid 子项的自动最小尺寸默认取内容宽度，长芯片名会把控件撑出轨道并与右侧控件重叠。 */
+.chip-control,
+.chip-picker {
+  min-width: 0;
+}
+
+.chip-picker {
+  position: relative;
+}
+
+.chip-picker-button,
+.chip-picker-value {
+  max-width: 100%;
+}
+
+.chip-picker-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 8px 0 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chip-picker-button:hover {
+  border-color: var(--accent-border);
+}
+
+.chip-picker-button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.chip-picker-value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--empty-text);
+}
+
+.chip-picker.has-selection .chip-picker-value {
+  color: var(--text);
+}
+
+.chip-picker-caret {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.chip-picker-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 28px));
+  max-height: min(560px, calc(100vh - 140px));
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.chip-picker-panel[hidden] {
+  display: none;
+}
+
+.chip-picker-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.chip-picker-search > svg {
+  position: absolute;
+  left: 9px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.chip-picker-search input {
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  border: 0;
+  padding: 0 30px 0 30px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.chip-picker-search-clear {
+  position: absolute;
+  right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chip-picker-search-clear:hover {
+  background: var(--surface-neutral);
+  color: var(--text);
+}
+
+.chip-picker-search-clear svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chip-picker-bulk {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  border-bottom: 1px solid var(--line);
+  padding: 5px 10px;
+  background: var(--panel);
+}
+
+.chip-picker-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip-picker-link:hover {
+  text-decoration: underline;
+}
+
+.chip-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.chip-picker-group {
+  border-radius: 5px;
+}
+
+.chip-picker-group + .chip-picker-group {
+  margin-top: 2px;
+}
+
+.chip-picker-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  border: 0;
+  border-radius: 5px;
+  padding: 3px 6px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chip-picker-group-head:hover {
+  background: var(--surface-neutral);
+}
+
+.chip-picker-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.chip-picker-group-head svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.chip-picker-group.expanded .chip-picker-group-head svg {
+  transform: rotate(90deg);
+}
+
+.chip-picker-group-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-picker-group-count {
+  flex: none;
+  border-radius: 9px;
+  padding: 1px 6px;
+  background: var(--surface-neutral);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.chip-picker-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0 4px 19px;
+}
+
+.chip-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chip-picker-item:hover {
+  background: var(--surface-neutral);
+}
+
+.chip-picker-item.active {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.chip-picker-item.focused {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.chip-picker-item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-picker-item mark {
+  border-radius: 2px;
+  padding: 0 1px;
+  background: var(--amber-soft);
+  color: inherit;
+}
+
+.chip-picker-item-tag {
+  flex: none;
+  border: 1px solid var(--amber-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.chip-picker-empty {
+  padding: 18px 10px;
+  color: var(--empty-text);
+  font-size: 12px;
+  text-align: center;
+}
+
+.chip-picker-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 32px;
+  border-top: 1px solid var(--line);
+  padding: 5px 9px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chip-picker-foot > span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-picker-hints {
+  display: inline-flex;
+  gap: 3px;
+  flex: none;
+}
+
+.chip-picker-hints kbd {
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 1px 4px;
+  background: var(--control-bg);
+  color: var(--subtle-text);
+  font-family: var(--font-mono);
+  font-size: 9px;
 }
 
 .search-input-wrap {
@@ -1270,7 +1637,9 @@ h2 {
 
 main {
   width: 100%;
-  padding: 18px;
+  /* 与 --main-padding 保持一致：section-head 置顶时用该值反向撑满左右留白。 */
+  --main-padding: 18px;
+  padding: var(--main-padding);
 }
 
 .view-section {
@@ -1282,11 +1651,25 @@ main {
 }
 
 .section-head {
+  /* 视图标题与其中的导航按钮（如“返回全局预览”）必须始终可见： */
+  /* 长表格滚到深处时，置顶比滚动回顶部才可操作更符合直觉。 */
+  position: sticky;
+  top: var(--topbar-height);
+  z-index: 20;
   display: flex;
   justify-content: space-between;
   align-items: end;
   gap: 16px;
-  margin-bottom: 12px;
+  /* 负外边距 + 内边距让置顶时的背景铺满 main 的左右留白，避免内容从缝隙透出。 */
+  margin: -6px calc(-1 * var(--main-padding)) 12px;
+  padding: 6px var(--main-padding) 10px;
+  background: var(--bg);
+  border-bottom: 1px solid transparent;
+}
+
+/* 置顶时补一条分隔线，与顶栏形成视觉分层。 */
+.section-head.is-stuck {
+  border-bottom-color: var(--line);
 }
 
 .table-section-heading {
@@ -1382,8 +1765,10 @@ main {
 
 .system-overview-index {
   position: sticky;
-  top: var(--system-overview-sticky-top, 72px);
-  z-index: 12;
+  /* 视图标题本身也置顶，分类索引必须停在其下方，否则会被标题盖住。 */
+  top: calc(var(--system-overview-sticky-top, 72px) + var(--section-head-height, 66px));
+  /* 高于 .section-head，保证两者万一重叠时索引仍在最上层。 */
+  z-index: 21;
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
@@ -1434,8 +1819,10 @@ main {
 }
 
 .system-overview-group {
+  /* 跳转后要同时让开顶栏、视图标题和分类索引三条置顶带。 */
   scroll-margin-top: calc(
-    var(--system-overview-sticky-top, 72px) + var(--system-overview-index-height, 54px) + 12px
+    var(--system-overview-sticky-top, 72px) + var(--section-head-height, 66px) +
+      var(--system-overview-index-height, 54px) + 12px
   );
 }
 
@@ -3269,6 +3656,8 @@ main {
   background: var(--panel);
   box-shadow: var(--dialog-shadow);
   overflow: hidden;
+  /* 整个面板作为滚动边界：面板内任何位置滚动都不带动背后的芯片资料页面。 */
+  overscroll-behavior: contain;
 }
 
 .radix-dialog.is-wide {
@@ -3414,6 +3803,8 @@ main {
 .radix-dialog-body {
   min-height: 0;
   overflow: auto;
+  /* 滚到边界后不再把滚轮传给背后的芯片资料页面。 */
+  overscroll-behavior: contain;
   flex: 1 1 auto;
   padding-top: 18px;
   padding-bottom: 20px;
@@ -3622,6 +4013,8 @@ main {
   display: grid;
   max-height: 144px;
   overflow-y: auto;
+  /* 计算历史滚到底后，滚轮应继续作用于进制工具面板本身。 */
+  overscroll-behavior: contain;
 }
 
 .calculator-clear-button {
@@ -5122,14 +5515,16 @@ main {
   }
 
   .system-overview-index {
-    top: var(--system-overview-sticky-top, 0px);
+    /* 窄屏顶栏不再置顶，但视图标题仍置顶，索引需继续停在标题下方。 */
+    top: var(--section-head-height, 66px);
   }
 
 }
 
 @media (max-width: 560px) {
   main {
-    padding: 12px;
+    --main-padding: 12px;
+    padding: var(--main-padding);
   }
 
   .topbar {

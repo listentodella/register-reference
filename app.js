@@ -88,6 +88,11 @@
     languageMode: "bilingual",
     translationNotice: "",
     systemOverviewSnapshot: null,
+    chipPickerOpen: false,
+    chipPickerQuery: "",
+    chipPickerExpanded: new Set(),
+    chipPickerFocusIndex: -1,
+    chipPickerCategories: [],
   };
 
   let libraryRecords = [];
@@ -103,6 +108,16 @@
 
   const els = {
     chipSelect: document.getElementById("chipSelect"),
+    chipPicker: document.getElementById("chipPicker"),
+    chipPickerButton: document.getElementById("chipPickerButton"),
+    chipPickerButtonLabel: document.getElementById("chipPickerButtonLabel"),
+    chipPickerPanel: document.getElementById("chipPickerPanel"),
+    chipPickerSearch: document.getElementById("chipPickerSearch"),
+    chipPickerSearchClear: document.getElementById("chipPickerSearchClear"),
+    chipPickerExpandAll: document.getElementById("chipPickerExpandAll"),
+    chipPickerCollapseAll: document.getElementById("chipPickerCollapseAll"),
+    chipPickerList: document.getElementById("chipPickerList"),
+    chipPickerSummary: document.getElementById("chipPickerSummary"),
     pageSelect: document.getElementById("pageSelect"),
     searchInput: document.getElementById("searchInput"),
     searchControl: document.getElementById("searchControl"),
@@ -2332,6 +2347,33 @@
     }, 0);
   }
 
+  /* WebKit 只在“真正会滚动的元素”上遵守 overscroll-behavior（Chromium 会沿祖先链查找）。 */
+  /* 因此滚轮落在浮层中不可滚动的区域（标题栏、工具栏、输入框）时，滚动仍会传给背后页面。 */
+  /* 这里统一兜底：把浮层当作滚动边界，阻止事件传到文档。 */
+  function containPanelWheel(event) {
+    const boundary = event.currentTarget;
+    if (!boundary || boundary.hidden) return;
+    /* 找到起点所在的可滚动祖先；只有它还能朝该方向滚动时才放行。 */
+    let node = event.target instanceof Element ? event.target : null;
+    while (node && node !== boundary) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+        const atTop = node.scrollTop <= 0;
+        const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
+        if (event.deltaY < 0 ? !atTop : !atBottom) return;
+      }
+      node = node.parentElement;
+    }
+    event.preventDefault();
+  }
+
+  /* 浮层开启时把它们注册为滚动边界；事件需要 preventDefault，故必须 passive: false。 */
+  function containWheelScroll(...panels) {
+    panels
+      .filter(Boolean)
+      .forEach((panel) => panel.addEventListener("wheel", containPanelWheel, { passive: false }));
+  }
+
   function closeRadixDialog(restoreFocus = true) {
     if (els.radixDialog.hidden) return;
     const pointerId = state.radixDrag?.pointerId;
@@ -3314,9 +3356,35 @@
     const isSticky = getComputedStyle(topbar).position === "sticky";
     const offset = isSticky ? Math.ceil(topbar.getBoundingClientRect().height) : 0;
     document.documentElement.style.setProperty("--system-overview-sticky-top", `${offset}px`);
+    /* 视图标题置顶需要跟随顶栏实际高度：窄屏时顶栏会换行变高。 */
+    document.documentElement.style.setProperty("--topbar-height", `${offset}px`);
     const index = els.matrixGrid.querySelector(".system-overview-index");
     const indexHeight = index ? Math.ceil(index.getBoundingClientRect().height) : 0;
     els.matrixGrid.style.setProperty("--system-overview-index-height", `${indexHeight}px`);
+    syncSectionHeadHeight();
+    updateSectionHeadStuckState();
+  }
+
+  /* 全局预览的分类索引需要停在视图标题下方，因此把标题实际高度发布为变量。 */
+  function syncSectionHeadHeight() {
+    const head = Array.from(document.querySelectorAll(".section-head")).find(
+      (item) => item.offsetParent !== null,
+    );
+    const height = head ? Math.ceil(head.getBoundingClientRect().height) : 0;
+    document.documentElement.style.setProperty("--section-head-height", `${height}px`);
+  }
+
+  /* 视图标题置顶后补一条分隔线，明确它与滚动内容的分层。 */
+  function updateSectionHeadStuckState() {
+    const topbarHeight = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--topbar-height"),
+    ) || 0;
+    document.querySelectorAll(".section-head").forEach((head) => {
+      if (head.offsetParent === null) return;
+      const naturalTop = head.getBoundingClientRect().top;
+      /* 标题顶边贴到顶栏下沿或更上方时，说明它已经置顶。 */
+      head.classList.toggle("is-stuck", naturalTop <= topbarHeight + 0.5);
+    });
   }
 
   function renderSystemOverview() {
@@ -4836,10 +4904,145 @@
     els.libraryQuickButton.focus({ preventScroll: true });
   }
 
+  function chipDisplayName(chip, index) {
+    return localizedLabel(chip.sensor || chip._id || `Chip ${index + 1}`, getTranslationRoot(chip)?.sensor);
+  }
+
+  /* 芯片名、厂商、系列与分类一起参与过滤，因此输入型号片段或厂商都能命中。 */
+  function chipSearchHaystack(chip, index) {
+    return [
+      chipDisplayName(chip, index),
+      chip.sensor,
+      chip._id,
+      chip._category,
+      chip.vendor,
+      chip.family,
+      chip._source,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function splitChipGroups(query = "") {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const groups = new Map();
+    chips.forEach((chip, index) => {
+      const category = chip._category || "未分类";
+      const haystack = chipSearchHaystack(chip, index);
+      if (terms.length && !terms.every((term) => haystack.includes(term))) return;
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push({ chip, index, label: chipDisplayName(chip, index) });
+    });
+    return Array.from(groups.entries()).map(([category, items]) => ({ category, items }));
+  }
+
+  /* 默认全部折叠，只有显式展开过的分类才展开；搜索时强制展开， */
+  /* 否则结果会被折叠分类藏起来，让人以为没搜到。 */
+  function isChipGroupExpanded(category) {
+    if (state.chipPickerQuery.trim()) return true;
+    return state.chipPickerExpanded.has(category);
+  }
+
+  function highlightChipLabel(label, query) {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return escapeHtml(label);
+    const lower = label.toLowerCase();
+    /* 只在命中处切分，避免把用户输入当正则解释。 */
+    const ranges = [];
+    terms.forEach((term) => {
+      let from = lower.indexOf(term);
+      while (from >= 0) {
+        ranges.push([from, from + term.length]);
+        from = lower.indexOf(term, from + term.length);
+      }
+    });
+    if (!ranges.length) return escapeHtml(label);
+    ranges.sort((left, right) => left[0] - right[0]);
+    const merged = [];
+    ranges.forEach((range) => {
+      const last = merged[merged.length - 1];
+      if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+      else merged.push([...range]);
+    });
+    let html = "";
+    let cursor = 0;
+    merged.forEach(([start, end]) => {
+      html += escapeHtml(label.slice(cursor, start));
+      html += `<mark>${escapeHtml(label.slice(start, end))}</mark>`;
+      cursor = end;
+    });
+    return html + escapeHtml(label.slice(cursor));
+  }
+
+  function visibleChipItems() {
+    return state.chipPickerCategories
+      .filter((group) => isChipGroupExpanded(group.category))
+      .flatMap((group) => group.items.map((item) => item.index));
+  }
+
+  function renderChipPickerList() {
+    const groups = splitChipGroups(state.chipPickerQuery);
+    state.chipPickerCategories = groups;
+    const total = chips.length;
+    const matched = groups.reduce((sum, group) => sum + group.items.length, 0);
+    if (!groups.length) {
+      els.chipPickerList.innerHTML = '<p class="chip-picker-empty">没有匹配的芯片</p>';
+    } else {
+      els.chipPickerList.innerHTML = groups
+        .map((group) => {
+          const expanded = isChipGroupExpanded(group.category);
+          const items = expanded
+            ? `<div class="chip-picker-items" role="group">${group.items
+                .map(
+                  ({ chip, index, label }) => `
+                    <button type="button" role="option" class="chip-picker-item${index === state.chipIndex ? " active" : ""}"
+                      data-chip-picker-index="${index}" aria-selected="${index === state.chipIndex}"
+                      title="${escapeHtml(label)}">
+                      <span class="chip-picker-item-name">${highlightChipLabel(label, state.chipPickerQuery)}</span>
+                      ${chip._temporaryHidden ? '<span class="chip-picker-item-tag">临时查看</span>' : ""}
+                    </button>`,
+                )
+                .join("")}</div>`
+            : "";
+          return `
+            <div class="chip-picker-group${expanded ? " expanded" : ""}">
+              <button type="button" class="chip-picker-group-head" data-chip-picker-group="${escapeHtml(group.category)}"
+                aria-expanded="${expanded}">
+                <i data-lucide="chevron-right"></i>
+                <span class="chip-picker-group-name">${escapeHtml(group.category)}</span>
+                <span class="chip-picker-group-count">${group.items.length}</span>
+              </button>
+              ${items}
+            </div>`;
+        })
+        .join("");
+    }
+    els.chipPickerSummary.textContent = state.chipPickerQuery.trim()
+      ? `匹配 ${matched} / ${total} 个芯片`
+      : `共 ${total} 个芯片 · ${groups.length} 个分类`;
+    refreshIcons(els.chipPickerList);
+  }
+
+  function syncChipPickerTrigger() {
+    const chip = chips[state.chipIndex];
+    const label = chip ? chipDisplayName(chip, state.chipIndex) : "尚未导入芯片";
+    const fullLabel = chip?._temporaryHidden ? `${label}（临时查看）` : label;
+    els.chipPickerButtonLabel.textContent = fullLabel;
+    /* 名称过长时按钮内是省略号，用原生 title 提供完整名称。 */
+    els.chipPickerButton.title = fullLabel;
+    els.chipPicker.classList.toggle("has-selection", Boolean(chip));
+    els.chipPickerButton.disabled = chips.length === 0;
+  }
+
   function populateChipSelect() {
     if (!chips.length) {
       els.chipSelect.innerHTML = '<option value="">尚未导入芯片</option>';
       els.chipSelect.disabled = true;
+      state.chipPickerCategories = [];
+      els.chipPickerList.innerHTML = "";
+      syncChipPickerTrigger();
+      els.chipPickerSummary.textContent = "尚未导入芯片";
       return;
     }
     const groups = new Map();
@@ -4852,13 +5055,154 @@
       .map(
         ([category, items]) => `
           <optgroup label="${escapeHtml(category)}">
-            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(localizedLabel(chip.sensor || chip._id || `Chip ${index + 1}`, getTranslationRoot(chip)?.sensor))}${chip._temporaryHidden ? "（临时查看）" : ""}</option>`).join("")}
+            ${items.map(({ chip, index }) => `<option value="${index}">${escapeHtml(chipDisplayName(chip, index))}${chip._temporaryHidden ? "（临时查看）" : ""}</option>`).join("")}
           </optgroup>
         `,
       )
       .join("");
     els.chipSelect.disabled = chips.length === 0;
     els.chipSelect.value = String(Math.min(state.chipIndex, Math.max(0, chips.length - 1)));
+    syncChipPickerTrigger();
+    if (state.chipPickerOpen) renderChipPickerList();
+  }
+
+  function setChipPickerFocus(index) {
+    const items = visibleChipItems();
+    if (!items.length) {
+      state.chipPickerFocusIndex = -1;
+      return;
+    }
+    const position = items.indexOf(index);
+    state.chipPickerFocusIndex = position >= 0 ? position : 0;
+  }
+
+  /* 焦点索引存的是“可见项序号”，渲染后需重新落回 DOM。 */
+  function applyChipPickerFocusScroll() {
+    const buttons = Array.from(els.chipPickerList.querySelectorAll(".chip-picker-item"));
+    buttons.forEach((button) => button.classList.remove("focused"));
+    const focused = buttons[state.chipPickerFocusIndex];
+    if (!focused) return;
+    focused.classList.add("focused");
+    focused.scrollIntoView({ block: "nearest" });
+  }
+
+  function moveChipPickerFocus(delta) {
+    const items = visibleChipItems();
+    if (!items.length) return;
+    const current = state.chipPickerFocusIndex;
+    const next = current < 0 ? 0 : (current + delta + items.length) % items.length;
+    state.chipPickerFocusIndex = next;
+    applyChipPickerFocusScroll();
+  }
+
+  function nearestChipPickerGroup(direction) {
+    const items = visibleChipItems();
+    const buttons = Array.from(els.chipPickerList.querySelectorAll(".chip-picker-item"));
+    if (!items.length || !buttons.length) return;
+    const currentIndex = items[Math.max(0, state.chipPickerFocusIndex)];
+    const currentGroup = state.chipPickerCategories.find((group) =>
+      group.items.some((item) => item.index === currentIndex),
+    );
+    if (!currentGroup) return;
+    const expanded = state.chipPickerCategories.filter((group) => isChipGroupExpanded(group.category));
+    const position = expanded.indexOf(currentGroup) + direction;
+    if (position < 0 || position >= expanded.length) return;
+    const target = expanded[position];
+    if (!target.items.length) return;
+    setChipPickerFocus(target.items[0].index);
+    applyChipPickerFocusScroll();
+  }
+
+  function openChipPicker() {
+    if (els.chipPickerButton.disabled || state.chipPickerOpen) return;
+    state.chipPickerOpen = true;
+    els.chipPickerPanel.hidden = false;
+    els.chipPickerButton.setAttribute("aria-expanded", "true");
+    renderChipPickerList();
+    setChipPickerFocus(state.chipIndex);
+    els.chipPickerSearch.focus({ preventScroll: true });
+    applyChipPickerFocusScroll();
+  }
+
+  function closeChipPicker({ restoreFocus = false } = {}) {
+    if (!state.chipPickerOpen) return;
+    state.chipPickerOpen = false;
+    els.chipPickerPanel.hidden = true;
+    els.chipPickerButton.setAttribute("aria-expanded", "false");
+    state.chipPickerFocusIndex = -1;
+    /* 收起时清空搜索，下次打开是干净的列表；折叠状态仍然保留。 */
+    setChipPickerQuery("");
+    if (restoreFocus) els.chipPickerButton.focus({ preventScroll: true });
+  }
+
+  function toggleChipPicker() {
+    if (state.chipPickerOpen) closeChipPicker({ restoreFocus: true });
+    else openChipPicker();
+  }
+
+  function setChipPickerQuery(value) {
+    state.chipPickerQuery = value;
+    if (els.chipPickerSearch.value !== value) els.chipPickerSearch.value = value;
+    els.chipPickerSearchClear.hidden = !value;
+    renderChipPickerList();
+    const items = visibleChipItems();
+    state.chipPickerFocusIndex = items.length ? 0 : -1;
+    applyChipPickerFocusScroll();
+  }
+
+  /* 选择一个芯片：原生 select 仍是唯一入口，保证既有同步逻辑只走一条路径。 */
+  async function selectChipFromPicker(index) {
+    if (!chips[index]) return;
+    closeChipPicker({ restoreFocus: true });
+    els.chipSelect.value = String(index);
+    els.chipSelect.dispatchEvent(new Event("change"));
+  }
+
+  function handleChipPickerClick(event) {
+    const groupHead = event.target.closest("[data-chip-picker-group]");
+    if (groupHead) {
+      const category = groupHead.dataset.chipPickerGroup;
+      if (state.chipPickerExpanded.has(category)) state.chipPickerExpanded.delete(category);
+      else state.chipPickerExpanded.add(category);
+      renderChipPickerList();
+      return;
+    }
+    const item = event.target.closest("[data-chip-picker-index]");
+    if (item) selectChipFromPicker(Number(item.dataset.chipPickerIndex));
+  }
+
+  function handleChipPickerKeydown(event) {
+    const items = visibleChipItems();
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveChipPickerFocus(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveChipPickerFocus(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      nearestChipPickerGroup(1);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      nearestChipPickerGroup(-1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      state.chipPickerFocusIndex = items.length ? 0 : -1;
+      applyChipPickerFocusScroll();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      state.chipPickerFocusIndex = items.length ? items.length - 1 : -1;
+      applyChipPickerFocusScroll();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (items.length) selectChipFromPicker(items[Math.max(0, state.chipPickerFocusIndex)]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      /* 以输入框实际内容为准：原生 search 输入或脚本赋值都可能绕过 state。 */
+      if (els.chipPickerSearch.value || state.chipPickerQuery) setChipPickerQuery("");
+      else closeChipPicker({ restoreFocus: true });
+    }
   }
 
   function populatePageSelect() {
@@ -5475,6 +5819,23 @@
     els.dumpExportJsonButton.addEventListener("click", exportDumpJson);
     els.radixToolButton.addEventListener("click", openRadixDialog);
     els.radixDialogCloseButton.addEventListener("click", closeRadixDialog);
+    /* 所有浮层都当作滚动边界，避免滚轮穿透到背后的芯片资料页面。 */
+    containWheelScroll(
+      els.radixDialog,
+      els.toolsMenu,
+      els.themeMenu,
+      els.libraryPanel,
+      els.searchPanel,
+      els.dumpAnalyzerDialog,
+      els.attachmentsDialog,
+      els.noteDialog,
+      els.importPreviewDialog,
+      els.libraryRemoveDialog,
+      els.importResultDialog,
+      els.hoverPanel,
+    );
+
+    els.radixDialogDragHandle.addEventListener("pointerdown", startRadixDrag);
     els.radixDialogDragHandle.addEventListener("pointerdown", startRadixDrag);
     els.radixDialogDragHandle.addEventListener("pointermove", moveRadixDrag);
     els.radixDialogDragHandle.addEventListener("pointerup", endRadixDrag);
@@ -5676,12 +6037,64 @@
       els.yamlFolderInput.value = "";
     });
 
+    els.chipPickerButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleChipPicker();
+    });
+
+    els.chipPickerButton.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" && !state.chipPickerOpen) {
+        event.preventDefault();
+        openChipPicker();
+      }
+    });
+
+    els.chipPickerSearch.addEventListener("input", () => {
+      setChipPickerQuery(els.chipPickerSearch.value);
+    });
+
+    els.chipPickerSearch.addEventListener("keydown", handleChipPickerKeydown);
+
+    els.chipPickerSearchClear.addEventListener("click", () => {
+      els.chipPickerSearch.value = "";
+      setChipPickerQuery("");
+      els.chipPickerSearch.focus({ preventScroll: true });
+    });
+
+    els.chipPickerList.addEventListener("click", handleChipPickerClick);
+
+    els.chipPickerExpandAll.addEventListener("click", () => {
+      state.chipPickerExpanded = new Set(splitChipGroups(state.chipPickerQuery).map((group) => group.category));
+      renderChipPickerList();
+    });
+
+    els.chipPickerCollapseAll.addEventListener("click", () => {
+      state.chipPickerExpanded.clear();
+      renderChipPickerList();
+    });
+
+    /* 点击面板内部不关闭；点击别处或按 Esc 才收起。 */
+    els.chipPickerPanel.addEventListener("click", (event) => event.stopPropagation());
+
+    document.addEventListener("click", () => closeChipPicker());
+
+    /* 搜索框有搜索词时，Escape 先清空搜索并保持面板打开； */
+    /* 该分支由输入框自身的 keydown 处理并 stopPropagation，其余位置一律关闭面板。 */
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !state.chipPickerOpen) return;
+      if (event.defaultPrevented) return;
+      closeChipPicker({ restoreFocus: true });
+    });
+
+    window.addEventListener("resize", () => closeChipPicker());
+
     els.chipSelect.addEventListener("change", async () => {
       closeNoteDialog();
       closeAttachmentsDialog();
       state.chipIndex = Number(els.chipSelect.value);
       state.loadMessage = "";
       state.translationNotice = "";
+      syncChipPickerTrigger();
       populatePageSelect();
       render();
       try {
@@ -5862,6 +6275,9 @@
       repositionOrHideDetailPanel();
       clampOpenRadixDialog();
     });
+
+    /* 置顶分隔线只依赖滚动位置，用 passive 监听避免影响滚动性能。 */
+    window.addEventListener("scroll", updateSectionHeadStuckState, { passive: true });
     window.addEventListener("popstate", (event) => restoreNavigationState(event.state));
   }
 

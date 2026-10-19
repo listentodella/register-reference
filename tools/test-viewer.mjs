@@ -879,12 +879,24 @@ ${mProfileBulkRegisters}
   await page.waitForFunction(() => window.scrollY > 400);
   const stickyPosition = await page.locator(".system-overview-index").evaluate((element) => {
     const topbar = document.querySelector(".topbar").getBoundingClientRect();
+    const head = element.closest(".view-section").querySelector(".section-head").getBoundingClientRect();
     const index = element.getBoundingClientRect();
-    return { indexTop: index.top, topbarBottom: topbar.bottom };
+    return {
+      indexTop: index.top,
+      topbarBottom: topbar.bottom,
+      headTop: head.top,
+      headBottom: head.bottom,
+    };
   });
+  /* 置顶分三层：顶栏 → 视图标题 → 分类索引；索引必须停在标题下方，
+     否则标题置顶后会盖住索引，索引也就失去意义。 */
   assert.ok(
-    Math.abs(stickyPosition.indexTop - stickyPosition.topbarBottom) <= 2,
-    `system category index should remain below the sticky topbar: ${JSON.stringify(stickyPosition)}`,
+    Math.abs(stickyPosition.headTop - stickyPosition.topbarBottom) <= 2,
+    `view heading should stick directly below the topbar: ${JSON.stringify(stickyPosition)}`,
+  );
+  assert.ok(
+    Math.abs(stickyPosition.indexTop - stickyPosition.headBottom) <= 2,
+    `system category index should remain below the sticky view heading: ${JSON.stringify(stickyPosition)}`,
   );
   await page.locator(".system-overview-index-item").filter({ hasText: "SCB" }).click();
   const anchoredGroupPosition = await page.locator("#system-overview-group-2").evaluate((element) => {
